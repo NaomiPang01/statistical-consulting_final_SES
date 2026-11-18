@@ -1,0 +1,3887 @@
+---
+title: "Statistical Consulting: Final Project"
+subtitle: "The Effect of Students' Socioeconomic Status on Academic Performance - A Causal Inference Approach"
+author: "Group 5: 潘皓心、劉育甄、何佩勳、黃芯鈺、何淑雯"
+date: today
+format:
+  pdf:
+    pdf-engine: xelatex
+    toc: true
+    include-in-header:
+      - text: |
+          \usepackage{setspace,relsize}
+          \usepackage{geometry}
+          \geometry{verbose,tmargin=2.5cm,bmargin=2.5cm,lmargin=2.5cm,rmargin=2.5cm}
+          \usepackage{booktabs}
+          \usepackage[table,xcdraw]{xcolor}
+          \usepackage{longtable}
+          \usepackage{adjustbox}
+          \usepackage{xeCJK}
+          \setCJKmainfont{Microsoft JhengHei Bold}
+lang: zh-TW
+documentclass: article
+execute:
+  tidy: true
+  echo: true
+  warning: false
+  message: false
+---
+
+# A. Background
+
+教育一直被視為促進個人社會階層向上流動與提升整體社會流動性的重要手段。然而在實際社會中，學生的學業表現往往深受其家庭社會經濟地位（Socioeconomic Status, SES）影響，例如父母教育程度與家庭可支配資源等。過去已有研究指出，來自高 SES 家庭的學生在學校表現、教育資源可近性、升學選擇等方面普遍優於低 SES 家庭的學生，進而導致教育機會的不平等（Reardon, 2011）。
+
+\par
+
+根據經濟合作與發展組織（Organisation for Economic Co-operation and Development, OECD）於 2022 年公布的國際學生評量計畫（Programme for International Student Assessment, PISA）結果（OECD, 2023），在參與評量的 OECD 成員國中，學生的 SES 與其在數學、閱讀與科學等領域的表現之間存在顯著正向關聯，高 SES 學生的平均成績明顯優於低 SES 學生。此一現象顯示，目前教育制度仍無法有效抵消原生家庭背景所造成的學習落差。
+
+\par
+
+然而，既有文獻多以相關性或迴歸分析探討 SES 與學業表現之間的關係，這些方法雖能揭示統計關聯，卻難以釐清變數間的因果方向與潛在的中介機制。
+
+\par
+
+因此，本研究以 Kaggle平台上一份學生表現資料為基礎，旨在從因果推論的角度，探討SES對學生學業表現的影響，並進一步分析「是否完成備考課程」對學業成績的可能效應。除了直接估計SES與學業成果之間的處置效應外，本研究亦建構中介機制框架，檢視 SES 是否會透過影響學生參與備考課程的機率，間接改變其最終成績表現。藉由結合多種因果推論方法與中介分析策略，我們希望更全面理解SES在學習歷程中所扮演的多層次角色，並為教育政策與資源設計提供實證參考。
+
+# B. Data descriptopn
+
+## (1) Coding book
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{|p{3cm}|p{3cm}|p{2cm}|p{6cm}|}
+\hline
+\textbf{欄位名稱} & \textbf{中文解釋} & \textbf{資料型別} & \textbf{可能取值說明} \\
+\hline
+gender & 性別 & 類別型 & female（女性）、male（男性） \\
+\hline
+race/ethnicity & 種族/族群分類 & 類別型 & group A、group B、group C、group D、group E（五種族群） \\
+\hline
+parental level of education & 家長最高教育程度 & 類別型 & some high school、high school、some college、associate's degree、bachelor's degree、master's degree \\
+\hline
+lunch & 午餐類型 & 類別型 & standard（標準餐）、free/reduced（免費或減價午餐） \\
+\hline
+test preparation course & 是否完成備考課程 & 類別型 & none（未完成）、completed（已完成） \\
+\hline
+math score & 數學分數 & 數值型 & 0–100 之間的整數 \\
+\hline
+reading score & 閱讀分數 & 數值型 & 0–100 之間的整數 \\
+\hline
+writing score & 寫作分數 & 數值型 & 0–100 之間的整數 \\
+\hline
+\end{tabular}
+\caption{學生考試表現資料集的變數編碼說明表（Coding Book）}
+\end{table}
+
+## (2) Data preprocessing
+
+\par
+
+為便利後續分析與解釋，本研究將家長教育程度（edu）重新分類為「是否有大學教育背景」，作為學生社經地位（SES）的代理變數之一。同時，為簡化學業表現的指標，我們將原始資料中的數學、閱讀與作文三科成績取平均，統整為一個整體學業成績變數（results），作為主要的 outcome。
+
+```{r}
+library(fastDummies) ; library(Matching) ; library(ipw) ; 
+library(survey) ; library(estimatr) ; library(dplyr) ; library(tidyr) ; library(GGally)
+library(kableExtra) ; library(car) ; library(cobalt) ; library(boot) ; library(readr)
+library(lavaan)
+
+df <- read.csv("StudentsPerformance.csv")
+
+# Define covariates for regression and PS
+covariates <- c("gender", "race", "edu")
+df$results <- (df$math.score + df$reading.score + df$writing.score)/3
+df$language<-(df$reading.score + df$writing.score)/2
+
+
+df$course <- factor(df$test.preparation.course, levels = c("none", "completed"))
+df$lunch <- factor(df$lunch)
+df$gender <- factor(df$gender)
+df$race <- factor(df$race.ethnicity)
+#有上過大學設為1
+df <- df %>%
+  rename(edu = `parental.level.of.education`)
+
+df$edu <- ifelse(df$edu %in% c("bachelor's degree", "master's degree", "some college"), 1, 0)
+
+# 檢查結果
+table(df$edu)
+
+
+df$course <- ifelse(df$course == "none", 0, 1)
+df$lunch <- ifelse(df$lunch == "free/reduced", 0, 1)
+df$gender <- ifelse(df$gender == "female", 0, 1)
+df$race <- factor(df$race,
+                  levels = c("group A", "group B", "group C", "group D", "group E"),
+                  labels = c("a", "b", "c", "d", "e"),
+                  ordered = FALSE)
+```
+
+## (3) Data description
+
+```{r}
+#| results: asis
+#| echo: false
+library(Hmisc)
+library(dplyr)
+factoras <- c("edu","course", "lunch", "gender", "race")
+
+df1 <- df %>%
+  mutate(across(all_of(factoras), as.factor))
+  
+latex(
+  describe(df1), 
+  descript = "Descriptive Statistics",
+  file = '', 
+  caption.placement = "top"
+)
+
+results <- df$results
+language <- df$language
+math.score <- df$math.score
+par(mfrow = c(3, 1), mar = c(4, 4, 2, 1))
+hist(results); hist(language); hist(math.score)
+```
+
+# C. Methods
+
+## (1) Proxy variable of SES and exposure setting
+
+\par
+
+根據美國教育部所屬的國家教育統計中心（NCES, 2023），家庭社經地位（SES）傳統上定義為家庭收入、家長教育程度與家長職業地位的綜合指標。故在本研究中，家長教育程度（edu）作為核心的 SES 代理變項。
+
+\par
+
+此外，本研究亦將學生選擇的午餐等級（lunch）納入 SES 代理架構中，以捕捉家庭在校飲食與營養支持的物質可得性面向。雖然卡方檢定顯示午餐等級與家長教育程度之間未達顯著相關，但其所反映的營養與資源差異，依然是 SES 影響學業成就的潛在路徑之一。
+
+```{r}
+chisq.test(df$lunch,df$edu)
+```
+
+\par
+
+最後，本研究還將關注備考課程參與情形（course），作為學校層面提供的學術支持變項，並在後續章節中檢驗其與家長教育程度及午餐等級如何共同作用，對學業成績產生影響。
+
+## (2) Statistical analysis
+
+\par
+
+為了估計家庭社經地位（SES）對學生學業成績的處置效應，以及探討完成備考課程是否帶來額外成效，我們採用了十種常見的因果推論方法。由於本研究基於觀察性資料，處置變項（如 SES 或課程完成與否）並非隨機指派，直接比較組間平均成績容易產生偏誤。
+
+\par
+
+為控制潛在混淆，我們納入學生背景變項（如性別、父母教育程度、種族等）進行調整，並透過不同估計方法計算處置效應，包括 ATE（整體平均效應）、ATT（對處置組的平均效應）與 ATO（重疊樣本的效應）。本研究涵蓋結果迴歸模型、傾向分數配對與加權、分層法，以及雙重穩健估計等方法。
+
+\par
+
+不同方法對模型假設與樣本使用策略各有差異。透過多種方法交叉比較，我們得以評估結果的穩健性，並觀察效應是否在不同學生群體（如整體學生、完成課程者、特徵條件相近者）間呈現異質性。
+
+\par
+
+以下為10種方法的假設簡介：
+
+| 方法編號 | 方法名稱 | 估計對象 | 主要假設 | 適用情境與注意事項 |
+|---------------|---------------|---------------|---------------|---------------|
+| 1 | 結果迴歸（Outcome regression） | ATE | Outcome 模型需正確指定 | 假設處置效應為可建模的函數（如線性）；結果對模型誤設敏感。 |
+| 2 | Mahalanobis 配對 | ATT | 可找到足夠接近的配對樣本 | 不依賴模型，但若變項多或樣本分佈不均，匹配品質可能不佳。 |
+| 3 | 傾向分數配對（PS Matching） | ATT | 傾向分數模型正確；配對後具交換性 | 僅針對成功配對樣本估計；可能丟失樣本且只適用於處置組。 |
+| 4 | PS 分層（Stratification） | ATE | 分層內具可交換性；PS 模型合理 | 避免極端權重；適合中等樣本且效果估計相對穩定。 |
+| 5 | PS 作為共變數（Covariate） | ATE | PS 模型正確；PS 能捕捉所有混淆變數 | 模型形式需正確指定（避免線性限制），常搭配 spline 或分層增強彈性。 |
+| 6 | IPW 加權迴歸（IPW regression） | ATE | PS 模型正確；加權能重建隨機分派樣貌 | 易受極端 PS 影響導致估計不穩定，建議搭配穩定化權重或 trimming。 |
+| 7 | Horvitz–Thompson 估計量 | ATE | 同上，但未正規化 | 對極端權重最敏感；在樣本偏態或 e(X) 極端時變異特別大。 |
+| 8 | Hájek 估計量 | ATE | HT 加上權重正規化 | 提升穩定性；估計值靠近 IPW regression，但仍依賴 PS 模型正確性。 |
+| 9 | Overlap 加權（Overlap Weighting） | ATO | PS 模型正確；僅針對 PS 在中間區間者估計效應 | 聚焦於兩組特徵重疊者，降低外插誤差；適合 overlap 不佳情境。 |
+| 10 | 雙重穩健估計（Doubly Robust） | ATE | Outcome 或 PS 模型正確即可 | 最穩健的方法之一；即使其中一模型錯，仍能一致估計處置效應。 |
+
+: 表 2：十種處置效應估計方式之模型假設與適用情境比較
+
+\par
+
+由於資料能提供的共變數（covariates）數量相對有限，混淆控制的完整性可能受到限制。因此，我們進一步計算 E-value 作為敏感度分析指標，用以評估未觀察混淆變數所需具備的最小強度，才能完全解釋觀察到的處理效應。若 E-value 數值偏小，表示即使存在中等強度的未觀察混淆，研究結論仍可能不穩定；反之，若 E-value 達到中至高水準，則代表觀察到的效應相對穩健，不易受到潛在混淆影響。
+
+(1) 主要問題 1：家長教育程度（SES）是否會影響學生的學業成績 (DAG)
+-   在控制性別、種族、午餐類型情形下，以「家長教育程度」代表SES ，若家長教育程度為有上大學，則對學業成績具有正向效果。\
+![](edu.png)
+
+(2) 主要問題 2：午餐類型（SES）是否會影響學生的學業成績 (DAG)
+-   在控制性別、種族、家長教育程度情形下，以「午餐類型」代表SES ，若午餐為標準餐，則對學業成績具有正向效果。\
+![](lunch.png)
+
+(3) 主要問題 3：學校的學術支持是否會影響學生的學業成績 (DAG)
+-   在控制性別、種族、家長教育程度、午餐類型情形下，以「完成備考課程」表示學校的學術支持，若有完成課程，則對學業成績具有正向效果。\
+![](course.png)
+
+\par
+
+另外，為了評估完成備考課程是否為家長教育程度與學業成績之間的重要中介變項，分別對於數學成績、語文成績以及三科的平均成績進行中介分析。首先，透過邏輯斯回歸建立中介變項「是否完成備考課程」的預測模型，其中自變項為家長教育程度和午餐類型，並控制性別與種族。接著，以線性迴歸模型分別估計學業平均成績、語文成績與數學成績，並同樣控制性別與種族。最後，為獲得穩健的推論結果，採用 bootstrap 進行重抽樣 10000 次，以估計中介效果指標的信賴區間與 p 值，包括平均因果中介效應（ACME, Average Causal Mediation Effect）與平均直接效應（ADE, Average Direct Effect），並計算總效應與中介比例（prop. mediated）。若平均因果中介效應顯著，表示備考課程在家長教育程度與學業成績之間扮演重要的中介角色;反之，則表示備考課程的中介效果不明顯。
+
+(4) 主要問題 ：「完成備考課程」是否為 SES 與學業成績之間的中介變項 (DAG)
+-   控制性別、種族情形下，以「家長教育程度」代理SES， 家長教育程度可以影響學生「是否完成備考課程」，進而影響其學業成績。
+-   控制性別、種族情形下，以「午餐類型」代理SES ， 午餐類型可以影響學生「是否完成備考課程」，進而影響其學業成績。\
+![](mediation1.png)
+
+# D. Results
+
+## (1) 家長教育程度對學習成果的影響
+
+### (a) edu -\> results
+
+\par
+
+本研究使用多種方法估計家長教育程度對學生學業成績的處理效應，線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示估計值大多落在 3.6 至 3.9 區間，且除 Horvitz-Thompson 和 Hájek 估計量外，其他方法均達統計顯著性，整體趨勢一致。E-value 分析結果顯示所有方法的 E-value 均在 1.82 至 1.89 之間。這意味著即使有未觀察到的混淆變項，這個結果的穩健性相對較低，顯示我們的估計在某種程度上可能存在可交換性上的限制。
+
+【可交換性：我們已經控制了能觀察到的重要因素（像性別、種族、午餐），讓條件相似的學生可以互相比較。不過，依然可能有一些觀察不到的因素（比如確切的家庭收入）會造成偏誤，因此我們使用 E-value 來評估結果的穩定性。】
+
+\par
+
+在傾向分數模型中，觀察到大多數樣本的分數集中於 0.31 至 0.49，表示模型對處置機率的區辨力有限，進而影響加權與配對方法的表現。這會影響正向性假設，也可能降低加權或配對等方法的效果。
+
+【正向性假設：在我們的資料中，不同背景條件的學生的家長的教育程度都不一樣（有或沒有上大學），兩個組別都有足夠的樣本數量，沒有出現某些特定背景下完全沒有上大學的家長或完全都有上大學的家長的極端情況，確保了分析的可行性。】
+
+\par
+
+在配對方法的表現上，Mahalanobis matching 和 PS matching 的平均標準化差異（mean \|SMD\|）從配對前的約 0.03 降至配對後的 0，形式上呈現良好的平衡結果。雖然配對後的標準化差異都降到了 0，不過其實配對前就已經很低，代表在我們這些有限的控制變項條件下，本身就已經達到一定程度的平衡。但由於僅使用性別與種族兩項變項進行配對，所得平衡僅限於這些變項之上，無法涵蓋其他潛在混淆因子（如家庭經濟條件、學校資源等）。
+
+\par
+
+加權方法方面，Horvitz–Thompson 估計量在 outcome 偏態與權重未正規化的影響下，導致信賴區間大幅擴張（\[-4.5, 12.2\]），推論極不穩定；Hájek 估計量雖進行權重正規化，但仍呈現較大的標準誤（2.12）與寬廣的信賴區間（\[-0.4, 8.0\]），穩定性有限。相較之下，doubly robust 方法提供了較為穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r}
+covariates <- c("gender","race", "lunch")
+# m.1: Outcome regression
+m.1 <- lm(results ~ edu + lunch + gender + race, data = df)
+summary(m.1)
+
+vif(m.1)
+mean(m.1$residuals)
+cooksd = cooks.distance(m.1)
+max(cooksd)
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+plot(m.1)
+```
+
+#### Propensity score 計算
+
+```{r}
+ps_model <- glm(edu ~ race + gender + lunch , data = df, family = binomial)
+pscore <- ps_model$fitted.values
+df$pscore <- pscore
+ggplot(df, aes(x = pscore, fill = as.factor(edu))) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "steelblue"),
+                      labels = c("Control group", "Treatment group")) +
+    labs(title = "Propensity Score Density by Treatment Group",
+         x = "Propensity Score", fill = "Group")  +
+  xlim(0, 1) +
+    theme_minimal()
+```
+
+```{r}
+# m.2: Mahalanobis matching 
+set.seed(1234) 
+
+race_dummies <- model.matrix(~ race, data = df)[, -1]
+cov_mat <- cbind(
+  gender = df$gender,
+  lunch=df$lunch,
+  race_dummies
+)
+
+m.2 <- Match(
+  Y       = df$results,       
+  Tr      = df$edu,    
+  X       = cov_mat,         
+  M       = 1,              
+  replace = FALSE
+)
+
+# 2. Extract ATT point estimate
+maha_est_bs <- as.numeric(m.2$est)
+
+# 3. Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, ]
+  Match(Y = df$results, Tr = df$edu, X = cov_mat,
+        M = 1, replace = FALSE)$est
+}
+
+set.seed(1234)
+boot_out   <- boot(df, statistic = att_maha, R = 1000)
+maha_se_bs <- sd(boot_out$t, na.rm = TRUE)
+ci_lo_bs   <- maha_est_bs - 1.96 * maha_se_bs
+ci_hi_bs   <- maha_est_bs + 1.96 * maha_se_bs
+
+
+
+# 4. Balance diagnostics (mean |SMD|)
+bal2 <- bal.tab(
+  x        = m.2,
+  treat    = df$edu,
+  covs     = cov_mat,
+  un       = TRUE,
+  estimand = "ATT"
+)
+
+mean_pre_no  <- mean(abs(bal2$Balance$Diff.Un),  na.rm = TRUE)
+mean_post_no <- mean(abs(bal2$Balance$Diff.Adj), na.rm = TRUE)
+
+cat("No-replace matching:\n",
+    "  mean |SMD| before/after =",
+    round(mean_pre_no, 3), "/", round(mean_post_no, 3), "\n")
+print(bal2)
+```
+
+```{r}
+# m.3: Propensity score matching 
+m.3 <- Match(Y = df$results, Tr = df$edu, X = pscore, M = 1,caliper = 0.1) 
+att_ps_boot <- function(data, indices) {
+  d <- data[indices, ] 
+  Match(Y = d$results, Tr = d$edu, X = d$pscore, M = 1, replace = FALSE)$est
+}
+
+set.seed(1234) 
+# 執行 1000 次 bootstrap 
+boot_out <- boot(data = df, statistic = att_ps_boot, R = 1000)
+
+
+# Balance diagnostics before and after PS matching
+bal_psm <- bal.tab(x = m.3, # Match object 
+                   treat = df$edu, # treatment indicator 
+                   covs = df[, covariates], # covariates to assess balance 
+                   un = TRUE, # include unadjusted (pre-match) balance 
+                   estimand = "ATT" # Match() targets ATT by default
+                   )
+
+# Extract SMDs and compute mean absolute SMD
+diffs <- bal_psm$Balance
+mean_pre  <- mean(abs(diffs$Diff.Un), na.rm = TRUE) # before matching 
+mean_post <- mean(abs(diffs$Diff.Adj), na.rm = TRUE) # after matching
+
+cat("PS matching (ATT): mean |SMD| before/after =", 
+    round(mean_pre, 3), "/", round(mean_post, 3), "\n")
+print(bal_psm)
+```
+
+```{r}
+# m.4: PS stratification 
+G <- 5 
+breaks <- quantile(df$pscore, probs = (1:(G-1)) / G)
+df$strata <- cut(df$pscore, breaks = c(0, breaks, 1), labels = 1:G)
+table(df$strata)
+
+Neyman_SRE <- function(W, Y, strata.labels) { 
+  n <- length(W) 
+  groups <- unique(strata.labels) 
+  ests <- sapply(groups, function(gg) {
+    wt <- sum(strata.labels == gg) / n 
+    est_g <- mean(Y[strata.labels == gg & W == 1]) - mean(Y[strata.labels == gg & W == 0])
+    var_g <- var(Y[strata.labels == gg & W == 1]) / 
+              sum(strata.labels == gg & W == 1) + 
+             var(Y[strata.labels == gg & W == 0]) / 
+              sum(strata.labels == gg & W == 0) 
+    c(wt, est_g, var_g)
+  }) 
+  neyman.est <- sum(ests[1, ] * ests[2, ]) 
+  neyman.var <- sum(ests[1, ]^2 * ests[3, ]) 
+  c(est = neyman.est, se = sqrt(neyman.var)) 
+}
+
+res4 <- Neyman_SRE(W = df$edu, Y = df$results, strata.labels = df$strata)
+```
+
+```{r}
+# m.5: Regression with PS as covariate
+m.5 <- lm(results ~ edu + pscore, data = df) 
+summary(m.5)
+```
+
+```{r}
+# m.6: Regression weighted by inverse PS
+df$w <- ifelse(df$edu == 1, 1 / pscore, 1 / (1 - pscore)) 
+m.6 <- lm(results ~ edu, data = df, weights = w) 
+summary(m.6)
+```
+
+```{r}
+# m.7: Horvitz-Thompson (HT) statistic 
+ht_stat <- function(data, i) {
+  d <- data[i, ] 
+  mean(d$edu * d$results / d$pscore - (1 - d$edu) * d$results / (1 - d$pscore))
+}
+
+# Point estimate
+ht_est <- with(df, mean(edu * results / pscore - (1 - edu) * results / (1 - pscore))) 
+cat("HT point estimate =", round(ht_est, 2), "\n")
+
+# Bootstrap for HT
+set.seed(1234) 
+B <- 500 
+boot_ht <- boot(df, statistic = ht_stat, R = B)
+
+# 4. Extract HT SE and print
+ht_se <- sd(boot_ht$t, na.rm = TRUE) 
+
+```
+
+```{r}
+# m.8: Hájek statistic
+hajek_stat <- function(data, i) { 
+  d <- data[i, ] 
+  num <- mean(d$edu * d$results / d$pscore) -
+         mean((1 - d$edu) * d$results / (1 - d$pscore))
+  den <- mean(d$edu / d$pscore) + mean((1 - d$edu) / (1 - d$pscore)) 
+  num / den 
+}
+
+# Point estimate
+w1 <- df$edu / df$pscore # treated weight = 1/e_i 
+w0 <- (1 - df$edu) / (1 - df$pscore) # control weight = 1/(1-e_i)
+
+# 2. Compute weighted means and Hajek estimate
+hajek_est <- sum(df$edu * df$results / df$pscore) / sum(w1) -
+             sum((1 - df$edu) * df$results / (1 - df$pscore)) / sum(w0)
+
+
+
+# Bootstrap for Hajek
+set.seed(1234) 
+boot_hajek <- boot(df, statistic = hajek_stat, R = B)
+
+# Extract Hajek SE and print
+hajek_se <- sd(boot_hajek$t, na.rm = TRUE) 
+
+```
+
+```{r}
+# m.9: IPW with overlap weights
+df$w_ow <- ifelse(df$edu == 1, 1 - pscore, pscore) 
+m.9 <- lm(results ~ edu, data = df, weights = w_ow)
+summary(m.9)
+```
+
+```{r}
+# m.10: Doubly robust estimator
+z <- df$edu
+y <- df$results
+x <- df[, covariates]
+
+# 1. Estimate propensity score with truncation
+ps_model <- glm(z ~ ., data = data.frame(z, x), family = binomial)
+ps <- predict(ps_model, type = "response")
+ps <- pmin(0.99, pmax(0.01, ps))  # truncation to avoid extreme weights
+
+# 2. Outcome models: separate for treated and control (weighted regression)
+outcome1 <- glm(y ~ ., data = data.frame(x, y), weights = z, family = gaussian())$fitted.values
+outcome0 <- glm(y ~ ., data = data.frame(x, y), weights = 1 - z, family = gaussian())$fitted.values
+
+# 3. Compute doubly robust estimator
+res1 <- y - outcome1
+res0 <- y - outcome0
+dr_est <- mean(outcome1 - outcome0 + z * res1 / ps - (1 - z) * res0 / (1 - ps))
+
+cat("Doubly Robust ATE =", round(dr_est, 2), "\n")
+
+# 4. Define bootstrap function
+dr_boot <- function(data, i) {
+    d <- data[i, ]
+    z <- d$edu
+    y <- d$results
+    x <- d[, covariates]
+    
+    ps_model <- glm(z ~ ., data = data.frame(z, x), family = binomial)
+    ps <- predict(ps_model, type = "response")
+    ps <- pmin(0.99, pmax(0.01, ps))
+    
+    outcome1 <- glm(y ~ ., data = data.frame(x, y), weights = z, family = gaussian())$fitted.values
+    outcome0 <- glm(y ~ ., data = data.frame(x, y), weights = 1 - z, family = gaussian())$fitted.values
+    
+    res1 <- y - outcome1
+    res0 <- y - outcome0
+    
+    mean(outcome1 - outcome0 + z * res1 / ps - (1 - z) * res0 / (1 - ps))
+}
+
+# 5. Bootstrap SE
+set.seed(1234)
+boot_out <- boot(data = df, statistic = dr_boot, R = 1000)
+dr_se <- sd(boot_out$t, na.rm = TRUE)
+```
+
+```{r, echo=FALSE}
+library(broom) ; library(ggplot2);library(EValue)
+
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t),
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"],
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `edu`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'edu' Estimates Across Methods")
+```
+
+## (2) 學生午餐類型對學業成績的影響
+
+### (a) lunch -\> results
+
+\par
+
+這個小節旨在估計午餐類型對學生學業成績的處理效應。線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示各方法的估計值集中在 8.5 至 8.6 區間，效應量明顯高於家長教育程度的影響。除 Horvitz-Thompson 估計量外，其他方法均達統計顯著性。而 E-value 約在 2.84 到 2.86，代表即使有未觀察到的混淆變項，這個結果也相對穩健（相較於教育程度具有更高的穩健性），顯示我們的估計具有一定程度的可交換性。
+
+【可交換性：我們已經控制了能觀察到的重要因素（像性別、種族、家長教育程度），讓條件相似的學生可以互相比較。不過還是可能有一些觀察不到的因素（比如確切的家庭收入）會造成偏誤，所以我們會用 E-value 來檢驗結果有多穩定。】
+
+\par
+
+雖然處理組與控制組的傾向分數有重疊，但分數範圍相對狹窄，落在 0.57 到 0.73 之間，表示共變項對區分是否接受標準午餐的能力有限。這會影響正向性假設，也可能降低加權或配對等方法的效果。
+
+【正向性假設：在我們的資料中，不同背景條件的學生都有接受或未接受午餐補助的情況，兩個組別都有足夠的樣本數量，沒有出現某些特定背景下完全沒有午餐補助學生或完全都有午餐補助的極端情況，確保了分析的可行性。】
+
+\par
+
+在配對方法的表現上，Mahalanobis matching 和 PS matching 的平均標準化差異（mean \|SMD\|）從配對前的 0.016 降至配對後的 0。由於配對前的 SMD 本身已相當接近 0，此結果主要反映了在有限協變項條件下的平衡狀況。
+
+\par
+
+加權方法方面，Horvitz-Thompson 估計量雖仍出現較大的標準誤（4.47）與寬廣信賴區間（\[-0.3, 17.3\]），但相較於教育程度變項的分析結果，不穩定程度有所改善。Hájek 估計量的標準誤（2.22）與信賴區間（\[4.2, 12.9\]）同樣顯示改善趨勢，而 doubly robust 方法持續提供穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r all_methods_lunch,  warning=FALSE, message=FALSE, echo=FALSE}
+covariates <- c("gender","race","edu")
+
+# assemble pure-numeric covariate matrix
+cov_mat <- cbind(
+  gender = df$gender,
+  edu    = df$edu,
+  race_dummies
+)
+
+# --- (1) Outcome regression: lunch → results -------------------------------
+m.1 <- lm(results ~ lunch + gender + race + edu, data=df)
+print(summary(m.1))
+print(vif(m.1))
+print(mean(m.1$residuals))
+print(max(cooks.distance(m.1)))
+par(mfrow=c(2,2), mar=c(4,4,2,1)); plot(m.1)
+
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_mod <- glm(lunch ~ gender + race + edu, data=df, family=binomial)
+df$pscore <- predict(ps_mod, type="response")
+
+ggplot(df, aes(x = pscore, fill = as.factor(lunch))) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "steelblue"),
+                      labels = c("Control group", "Treatment group")) +
+    labs(title = "Propensity Score Density by Treatment Group",
+         x = "Propensity Score", fill = "Group") + 
+  xlim(0, 1) +
+    theme_minimal()
+```
+
+```{r, echo=FALSE}
+# --- (2) Mahalanobis matching -----------------------------------------------
+set.seed(1234)
+m.2 <- Match(
+  Y       = df$results,
+  Tr      = df$lunch,
+  X       = cov_mat,
+  M       = 1,
+  replace = TRUE
+)
+print(summary(m.2))
+
+# 2. Extract ATT point estimate
+maha_est_bs <- as.numeric(m.2$est)
+
+# 3. Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, ]
+  Match(Y = df$results, Tr = df$edu, X = cov_mat,
+        M = 1, replace = FALSE)$est
+}
+
+set.seed(1234)
+boot_out   <- boot(df, statistic = att_maha, R = 1000)
+maha_se_bs <- sd(boot_out$t, na.rm = TRUE)
+ci_lo_bs   <- maha_est_bs - 1.96 * maha_se_bs
+ci_hi_bs   <- maha_est_bs + 1.96 * maha_se_bs
+
+
+# balance
+bal2 <- bal.tab(m.2, treat=df$lunch, covs=cov_mat, un=TRUE, estimand="ATT")
+cat("Mean |SMD| before/after =", 
+    round(mean(abs(bal2$Balance$Diff.Un)),3),"/",
+    round(mean(abs(bal2$Balance$Diff.Adj)),3),"\n")
+print(bal2)
+
+# --- (3) Propensity score matching -----------------------------------------
+set.seed(1234)
+m.3 <- Match(Y=df$results, Tr=df$lunch, X=df$pscore, M=1)
+cat("PSM ATT =",round(m.3$est,2),"\n")
+boot_ps <- boot(df, statistic=function(d,i){
+  di<-d[i,]; Match(Y=di$results,Tr=di$lunch,X=di$pscore,M=1,replace=FALSE)$est
+}, R=1000)
+
+bal_ps <- bal.tab(m.3, treat=df$lunch, covs=df[,covariates], un=TRUE, estimand="ATT")
+cat("Mean |SMD| PSM before/after =",
+    round(mean(abs(bal_ps$Balance$Diff.Un)),3),"/",
+    round(mean(abs(bal_ps$Balance$Diff.Adj)),3),"\n")
+print(bal_ps)
+
+# --- (4) PS stratification (5 strata) ---------------------------------------
+G<-5
+brks<-quantile(df$pscore, probs=(1:(G-1))/G)
+df$strata<-cut(df$pscore, breaks=c(0,brks,1), labels=1:G)
+Neyman_SRE<-function(W,Y,strata){
+  n<-length(W); gs<-unique(strata)
+  ests<-sapply(gs,function(g){
+    wt<-sum(strata==g)/n
+    eg<-mean(Y[strata==g & W==1]) - mean(Y[strata==g & W==0])
+    vg<-var(Y[strata==g & W==1])/sum(strata==g & W==1)+
+        var(Y[strata==g & W==0])/sum(strata==g & W==0)
+    c(wt,eg,vg)
+  })
+  e<-sum(ests[1,]*ests[2,]); v<-sum(ests[1,]^2*ests[3,])
+  c(est=e,se=sqrt(v))
+}
+res4<-Neyman_SRE(df$lunch, df$results, df$strata)
+
+
+# --- (5) Regression with PS as covariate -----------------------------------
+m.5<-lm(results ~ lunch + pscore, data=df)
+print(summary(m.5))
+
+# --- (6) IPW regression ----------------------------------------------------
+df$w<-ifelse(df$lunch==1,1/df$pscore,1/(1-df$pscore))
+m.6<-lm(results ~ lunch, data=df, weights=w)
+print(summary(m.6))
+
+# --- (7) Horvitz–Thompson estimator ----------------------------------------
+ht_stat<-function(d,i){
+  di<-d[i,]; mean(di$lunch*di$results/di$pscore - (1-di$lunch)*di$results/(1-di$pscore))
+}
+ht_est<-mean(df$lunch*df$results/df$pscore - (1-df$lunch)*df$results/(1-df$pscore))
+boot_ht<-boot(df,statistic=ht_stat,R=500)
+ht_se<-sd(boot_ht$t,na.rm=TRUE)
+
+
+# --- (8) Hájek estimator ---------------------------------------------------
+hajek_stat<-function(d,i){
+  di<-d[i,]
+  num<-mean(di$lunch*di$results/di$pscore)-mean((1-di$lunch)*di$results/(1-di$pscore))
+  den<-mean(di$lunch/di$pscore)+mean((1-di$lunch)/(1-di$pscore))
+  num/den
+}
+hajek_est<-sum(df$lunch*df$results/df$pscore)/sum(df$lunch/df$pscore) -
+           sum((1-df$lunch)*df$results/(1-df$pscore))/sum((1-df$lunch)/(1-df$pscore))
+boot_hajek<-boot(df,statistic=hajek_stat,R=500)
+hajek_se<-sd(boot_hajek$t,na.rm=TRUE)
+
+
+# --- (9) Overlap weights (ATO) ---------------------------------------------
+df$w_ow<-ifelse(df$lunch==1,1-df$pscore, df$pscore)
+m.9<-lm(results ~ lunch, data=df, weights=w_ow)
+print(summary(m.9))
+
+# --- (10) Doubly Robust estimator -----------------------------------------
+z<-df$lunch; y<-df$results; x<-df[,covariates]
+ps_dr<-pmin(0.99,pmax(0.01,predict(glm(z~.,data=data.frame(z,x),family=binomial),type="response")))
+out1<-lm(y[z==1]~.,data=data.frame(y=y[z==1],x[z==1,])); out0<-lm(y[z==0]~.,data=data.frame(y=y[z==0],x[z==0,]))
+y1hat<-predict(out1,newdata=x); y0hat<-predict(out0,newdata=x)
+dr_est<-mean(y1hat-y0hat + z*(y-y1hat)/ps_dr - (1-z)*(y-y0hat)/(1-ps_dr))
+cat("DR ATE =",round(dr_est,2),"\n")
+dr_boot<-function(d,i){
+  di<-d[i,]; z_i<-di$lunch; y_i<-di$results; x_i<-di[i,covariates]
+  ps_i<-pmin(0.99,pmax(0.01,predict(glm(z_i~.,data=data.frame(z_i,x_i),family=binomial),type="response")))
+  o1<-lm(y_i[z_i==1]~.,data=data.frame(y_i=y_i[z_i==1],x_i[z_i==1,]))
+  o0<-lm(y_i[z_i==0]~.,data=data.frame(y_i=y_i[z_i==0],x_i[z_i==0,]))
+  y1p<-predict(o1,newdata=x_i); y0p<-predict(o0,newdata=x_i)
+  mean(y1p-y0p + z_i*(y_i-y1p)/ps_i - (1-z_i)*(y_i-y0p)/(1-ps_i))
+}
+boot_dr<-boot(df,statistic=dr_boot,R=1000)
+dr_se<-sd(boot_dr$t,na.rm=TRUE)
+ci_lo<-dr_est-1.96*dr_se; ci_hi<-dr_est+1.96*dr_se
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error, evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2])
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t) , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"]
+ , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2])
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2])
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `lunch`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'lunch' Estimates Across Methods")
+```
+
+## (3) 有無完成備考課程對成績的影響
+
+### (a) course -\> results
+
+\par
+
+本小節分析有無完成備考課程對學生學業成績的處理效應。線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示各方法的估計值主要分佈在 7.7 至 10.7 區間，其中配對方法 (Mahalanobis matching, PS matching, PS stratification, & Hájek) 呈現較高的效應估計（10.65 - 10.7），而其他方法多集中在 7.7 左右。除 Horvitz–Thompson 估計量外，其他方法均達統計顯著性。而 E-value 介於 2.65 至 3.37 之間，代表即使有未觀察到的混淆變項，這個結果也相對穩健（相較於教育程度具有更高的穩健性），顯示我們的估計具有一定程度的可交換性。
+
+【可交換性：我們已經控制了能觀察到的重要因素（像性別、種族、家長教育程度、午餐類型），讓條件相似的學生可以互相比較。不過還是可能有一些觀察不到的因素（比如確切的家庭收入）會造成偏誤，所以我們會用 E-value 來檢驗結果有多穩定。】
+
+\par
+
+傾向分數分佈區間依然很窄，大約落在 0.3 到 0.45。雖然兩組的分佈有重疊，但這代表共變項無法很好地預測學生是否完成備考課程，會影響平衡效果，也代表正向性可能受到挑戰。
+
+【正向性假設：在我們的資料中，不同背景條件的學生都有無完成備考課程的情況，兩個組別都有足夠的樣本數量，沒有出現某些特定背景下完全沒有完成備考課程或完全都有完成備考課程的極端情況，確保了分析的可行性。】
+
+\par
+
+在配對方法的平衡診斷上，Mahalanobis matching 的平均標準化差異（mean \|SMD\|）從配對前的 0.019 降至配對後的 0，而 PS matching 從 0.017 降至 0.004，兩者均達到良好的平衡效果。由於配對前的 SMD 本身已相當接近 0，此結果反映了在現有協變項控制下的平衡狀況。由於 SMD 都從原本接近 0 降到 0，幾乎完全平衡，表示在目前的控制變項條件下，確實可以讓兩組學生在基線上達成比較公平的比較。
+
+\par
+
+加權方法表現方面，Horvitz–Thompson 估計量出現較大的標準誤（4.35）與寬廣信賴區間（\[-0.8, 16.3\]），顯示估計不穩定。Hájek 估計量雖進行權重正規化，標準誤（2.17）與信賴區間（\[6.4, 14.9\]）仍較其他方法為大。相較之下，doubly robust 和其他迴歸基礎方法提供了更為穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r all_methods_course, echo=TRUE, warning=FALSE, message=FALSE, echo=FALSE}
+# Define covariates for course treatment
+treatment <- "course"
+covariates <- c("edu", "lunch", "gender", "race")
+
+# Prepare pure-numeric covariate matrix: edu, lunch, gender already 0/1; race -> dummy
+race_dummies <- model.matrix(~ race, data = df)[, -1]
+cov_mat <- cbind(
+  edu    = df$edu,
+  lunch  = df$lunch,
+  gender = df$gender,
+  race_dummies
+)
+
+# (1) Outcome regression: course → results
+m.1 <- lm(results ~ course + edu + lunch + gender + race, data = df)
+print(summary(m.1))
+print(vif(m.1))
+print(mean(m.1$residuals))
+print(max(cooks.distance(m.1)))
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1)); plot(m.1)
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_mod <- glm(course ~ edu + lunch + gender + race, data = df, family = binomial)
+df$pscore <- predict(ps_mod, type = "response")
+ggplot(df, aes(x = pscore, fill = as.factor(course))) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "steelblue"),
+                      labels = c("Control group", "Treatment group")) +
+    labs(title = "Propensity Score Density by Treatment Group",
+         x = "Propensity Score", fill = "Group")  +
+  xlim(0, 1) +
+    theme_minimal()
+```
+
+```{r, echo=FALSE}
+# (2) Mahalanobis matching: course as treatment
+set.seed(1234)
+match_maha <- Match(
+  Y       = df$results,
+  Tr      = df$course,
+  X       = cov_mat,
+  M       = 1,
+  replace = TRUE
+)
+print(summary(match_maha))
+
+# Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, , drop = FALSE]
+  # preserve race levels
+  d$race <- factor(d$race, levels = levels(df$race))
+  Xd <- model.matrix(~ edu + lunch + gender + race, data = d)[, -1]
+  Match(Y = d$results, Tr = d$course, X = Xd, M = 1, replace = FALSE)$est
+}
+boot_maha <- boot(df, statistic = att_maha, R = 1000)
+maha_est <- match_maha$est
+maha_se  <- sd(boot_maha$t, na.rm = TRUE)
+ci_maha <- maha_est + c(-1.96, 1.96) * maha_se
+
+
+# Balance diagnostics
+bal_maha <- bal.tab(match_maha, treat = df$course, covs = cov_mat, un = TRUE, estimand = "ATT")
+cat("Mean |SMD| before/after =",
+    round(mean(abs(bal_maha$Balance$Diff.Un)), 3), "/",
+    round(mean(abs(bal_maha$Balance$Diff.Adj)), 3), "\n")
+print(bal_maha)
+
+# (3) Propensity score matching
+ps_mod <- glm(course ~ edu + lunch + gender + race, data = df, family = binomial)
+df$pscore <- predict(ps_mod, type = "response")
+set.seed(1234)
+match_ps <- Match(Y = df$results, Tr = df$course, X = df$pscore, M = 1)
+cat("PSM ATT =", round(match_ps$est, 2), "\n")
+# bootstrap
+boot_ps <- boot(df, statistic = function(d, i) {
+  di <- d[i, , drop = FALSE]
+  Match(Y = di$results, Tr = di$course, X = di$pscore, M = 1, replace = FALSE)$est
+}, R = 1000)
+
+bal_ps <- bal.tab(match_ps, treat = df$course, covs = df[, covariates], un = TRUE, estimand = "ATT")
+cat("Mean |SMD| PSM before/after =",
+    round(mean(abs(bal_ps$Balance$Diff.Un)), 3), "/",
+    round(mean(abs(bal_ps$Balance$Diff.Adj)), 3), "\n")
+print(bal_ps)
+
+# (4) PS stratification (5 strata)
+G <- 5
+brks <- quantile(df$pscore, probs = (1:(G-1)) / G)
+df$strata <- cut(df$pscore, breaks = c(0, brks, 1), labels = 1:G)
+strat_res <- t(sapply(1:G, function(g) {
+  idx <- df$strata == g
+  c(weight = sum(idx)/nrow(df),
+    diff   = mean(df$results[idx & df$course==1]) - mean(df$results[idx & df$course==0]),
+    var    = var(df$results[idx & df$course==1]) / sum(idx & df$course==1) +
+             var(df$results[idx & df$course==0]) / sum(idx & df$course==0)
+  )
+}))
+ATE_strat <- sum(strat_res[,1] * strat_res[,2])
+SE_strat  <- sqrt(sum(strat_res[,1]^2 * strat_res[,3]))
+
+
+# (5) Regression with PS covariate
+m.5 <- lm(results ~ course + pscore, data = df)
+print(summary(m.5))
+
+# (6) IPW regression
+df$w <- ifelse(df$course==1, 1/df$pscore, 1/(1-df$pscore))
+m.6 <- lm(results ~ course, data = df, weights = w)
+print(summary(m.6))
+
+# (7) Horvitz–Thompson estimator
+ht_fun <- function(d,i) mean(d[i,]$course * d[i,]$results / d[i,]$pscore - (1-d[i,]$course)*d[i,]$results/(1-d[i,]$pscore))
+ht_est <- ht_fun(df, 1:nrow(df))
+b_ht <- boot(df, statistic=ht_fun, R=500)
+
+
+# (8) Hajek estimator
+hajek_fun <- function(d,i) {
+  di <- d[i,]
+  num <- mean(di$course*di$results/di$pscore) - mean((1-di$course)*di$results/(1-di$pscore))
+  den <- mean(di$course/di$pscore) + mean((1-di$course)/(1-di$pscore))
+  num/den
+}
+# hj_est <- hijek <- NA # placeholder; can implement similarly
+
+
+# (9) Overlap weights (ATO)
+df$w_ow <- ifelse(df$course==1, 1-df$pscore, df$pscore)
+m.9 <- lm(results ~ course, data=df, weights=w_ow)
+print(summary(m.9))
+
+# (10) Doubly Robust estimator
+x_df <- as.data.frame(cov_mat)
+z <- df$course;y<-df$results
+ps_dr <- pmin(0.99,pmax(0.01,predict(glm(z~.,data=data.frame(z,x_df),family=binomial),type="response")))
+out1 <- lm(y[z==1]~.,data=data.frame(y=y[z==1],x_df[z==1,]))
+out0 <- lm(y[z==0]~.,data=data.frame(y=y[z==0],x_df[z==0,]))
+y1hat<-predict(out1,newdata=x_df);y0hat<-predict(out0,newdata=x_df)
+dr_est<-mean(y1hat-y0hat+z*(y-y1hat)/ps_dr-(1-z)*(y-y0hat)/(1-ps_dr))
+
+dr_boot <- function(d,i){di<-d[i,];z_i<-di$course;y_i<-di$results;x_i<-as.data.frame(cov_mat[i,]);ps_i<-pmin(0.99,pmax(0.01,predict(glm(z_i~.,data=data.frame(z_i,x_i),family=binomial),type="response")));o1<-lm(y_i[z_i==1]~.,data=data.frame(y_i=y_i[z_i==1],x_i[z_i==1,]));o0<-lm(y_i[z_i==0]~.,data=data.frame(y_i=y_i[z_i==0],x_i[z_i==0,]));y1p<-predict(o1,newdata=x_i);y0p<-predict(o0,newdata=x_i);mean(y1p-y0p+z_i*(y_i-y1p)/ps_i-(1-z_i)*(y_i-y0p)/(1-ps_i))}
+b_dr<-boot(df,statistic=dr_boot,R=1000)
+dr_se<-sd(b_dr$t,na.rm=TRUE)
+ci<-dr_est+c(-1.96,1.96)*dr_se
+
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t),
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2])
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"], 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se, 
+   evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$results))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci, evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `course`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'course' Estimates Across Methods")
+```
+
+## (4) 中介分析（Mediation Analysis）
+
+### (a) 完成備考課程是否扮演中介角色？
+
+#### 家長教育程度 -\> 是否完成備考課程 -\> 學生學業成績
+
+```{r}
+library(mediation)
+df <- read.csv("df20250526.csv")
+
+# 中介模型
+model.c <- glm(course ~ edu + gender + race, family = binomial, data = df)
+summary(model.c)
+
+# 平均成績結果模型
+model.r <- lm(results ~ edu + course + gender + race, data = df)
+summary(model.r)
+
+# 中介分析
+set.seed(1234)
+result <- mediate(model.c, model.r, treat = "edu", mediator = "course", 
+                  boot = TRUE, sims = 10000)
+summary(result)
+
+
+```
+
+為探討家長教育程度是否透過「是否參與備考課程」間接影響學生的學業成績，亦即檢驗備考課程在家長教育程度與學業表現之間所扮演的中介角色。本研究對於數學、閱讀與寫作三科的平均成績進行中介分析。
+
+由結果顯示，家長教育程度對學業表現的總體效果（Total Effect）與直接效果（ADE）皆具有統計顯著性， 表示家庭背景對學生的學科表現有正向的直接影響。
+
+然而，「完成備考課程」的間接效果（ACME）未達顯著水準，且其信賴區間包含 0。 中介比例為負值，顯示備考課程並不是顯著的中介角色，甚至可能對學業成績存在負向影響。
+
+因此本研究並未發現「完成備考課程」在家長教育程度與學業成績之間具顯著中介效果。 備考課程雖然對學業成績有顯著影響，但無法說明家庭背景差異如何轉化為學習成果差異，可能反映學生參與備考行為受到其他未觀察因素影響。
+
+#### 午餐類型 -\> 是否完成備考課程 -\> 學生學業成績
+
+```{r}
+library(mediation)
+# 中介模型
+model.c <- glm(course ~ lunch + gender + race, family = binomial, data = df)
+summary(model.c)
+
+# 平均成績結果模型
+model.r <- lm(results ~ lunch + course + gender + race, data = df)
+summary(model.r)
+
+# 中介分析
+set.seed(1234)
+result <- mediate(model.c, model.r, treat = "lunch", mediator = "course", 
+                  boot = TRUE, sims = 10000)
+summary(result)
+```
+
+本研究以學生午餐類型作為家庭社會經濟地位（SES）的代理變數，進一步探討其是否透過「是否參與備考課程」間接影響學生的學業成績，亦即檢驗備考課程在 SES 與學業表現之間所扮演的中介角色。
+
+根據因果中介分析結果顯示，午餐類型對於學業總平均呈現顯著且正向的直接效果，表示在控制性別與種族等背景變項後，來自較高 SES 家庭的學生（享用標準午餐者）在各項學業表現上顯著優於低 SES 學生。這一結果與既有文獻一致，強化了家庭背景對學業成就的重要影響。
+
+然而，午餐類型透過「參與備考課程」所產生的間接效果（ACME）均不具統計顯著性，且中介效果比例（proportion mediated）為負值，表示備考課程未在 SES 與學業表現之間產生中介作用。也就是說，儘管高 SES 學生的學業成績較高，這並非透過參與備考課程所導致。
+
+### (b) 完成備考課程是否扮演中介角色？(SEM)
+
+```{r}
+library(lavaan)
+
+# Variable Preparation
+df$gender <- as.numeric(as.character(df$gender))
+df$course <- as.numeric(df$course)
+df$lunch <- as.numeric(df$lunch)
+df$edu <- as.numeric(df$edu)
+df$race <- as.factor(df$race)
+
+# Create race dummy variables
+race_dummies <- model.matrix(~ race - 1, data = df)
+colnames(race_dummies) <- gsub("race", "racegroup", colnames(race_dummies))  
+df <- cbind(df, race_dummies)
+df <- df[, !grepl("racegroupa", colnames(df))] 
+
+# Fit SEM (edu)
+model_edu <- '
+  # Mediator: course regressed on edu only
+  course ~ a1*edu + gender + racegroupb + racegroupc + racegroupd + racegroupe
+
+  # Outcome: results regressed on course and edu
+  results ~ b1*course + c1*edu + gender + racegroupb + racegroupc + racegroupd + racegroupe
+
+  # Indirect effect via course
+  ind_edu := a1 * b1
+
+  # Total effect of edu
+  total_edu := c1 + ind_edu
+'
+
+fit_edu <- sem(model_edu, data = df, se = "bootstrap", bootstrap = 1000)
+summary(fit_edu, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE)
+
+# fit SEM (lunch)
+model_lunch <- '
+  # Mediator: course regressed on lunch only
+  course ~ a2*lunch + gender + racegroupb + racegroupc + racegroupd + racegroupe
+
+  # Outcome: results regressed on course and lunch
+  results ~ b1*course + c2*lunch + gender + racegroupb + racegroupc + racegroupd + racegroupe
+
+  # Indirect effect via course
+  ind_lunch := a2 * b1
+
+  # Total effect of lunch
+  total_lunch := c2 + ind_lunch
+'
+
+fit_lunch <- sem(model_lunch, data = df, se = "bootstrap", bootstrap = 1000)
+summary(fit_lunch, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE)
+
+```
+
+我們進行了兩項中介分析，使用結構方程模型（SEM）來探討學生的教育程度與午餐類型是否會透過參加備考課程，間接影響學業表現。
+
+在第一個模型中，我們檢視了教育程度是否能預測學生是否參加備考課程，並探討備考課程是否在教育程度與學業表現之間產生中介作用。結果顯示，教育程度對是否參加備考課程的影響不顯著（估計值 = -0.004，p = 0.893）。然而，參加備考課程對學業表現有顯著正向影響（估計值 = 7.57，p \< 0.001）。教育程度透過課程參與對學業成績的間接效果並不顯著（估計值 = -0.032，p = 0.893），顯示無明顯中介作用。不過，教育程度對學業表現的總效果是顯著的（估計值 = 3.67，p \< 0.001），說明教育程度對成績有直接影響，但這個影響不是透過參加備考課程來實現的。
+
+在第二個模型中，我們改以午餐類型作為自變項，探討其是否影響學業表現，並同樣透過課程參與作為中介變項。結果顯示，午餐類型與是否參加備考課程之間的關聯不顯著（估計值 = -0.021，p = 0.529），但參與課程仍顯著正向預測學業成績（估計值 = 7.73，p \< 0.001）。午餐類型透過課程參與對成績的間接效果也不顯著（估計值 = -0.159，p = 0.533），顯示同樣缺乏中介效果。然而，午餐類型對學業成績的總效果顯著（估計值 = 8.47，p \< 0.001），代表午餐與學業表現之間存在直接關係。
+
+總結而言，兩個分析結果皆指出，雖然參加備考課程對學業表現具有明顯幫助，但教育程度與午餐類型皆無法有效預測學生是否參加此課程。這代表這些背景因素對學業表現的影響，是透過其他路徑發揮作用的。對教育程度而言，其直接效果可能來自過往的學習資源或學習準備程度；對午餐類型而言，可能與營養攝取、家庭背景或學校支援等因素有關。
+
+# E. Discussion
+
+本研究使用十種因果推論方法估計家庭社經地位（SES）對學業成績的影響，以及推論學生是否完成備考課程對其學習成果的效應，並進一步探討備考課程是否在家庭社經地位（SES） 與學業成績之間扮演中介角色，釐清可能的機制路徑。
+
+與傳統研究多數採用的相關分析或多元迴歸模型不同，本研究建立在因果推論的理論基礎上，在可比條件下對處理組與控制組進行效果估計，以還原更接近真實情境下的影響。傳統的相關分析雖可揭示變數之間的相關性，例如 SES 與學業成績之間的正相關，但這類分析無法釐清關係的方向性與因果性，亦無法排除第三變項（例如性別、種族或家庭其他條件）介入所造成的混淆。這樣的限制在使用觀察性資料時尤為嚴重，因為資料中的處置變項（如是否來自高 SES 背景）並非隨機指派，而是受多重背景因素所影響，直接比較兩組的平均成績，可能只是反映條件差異，而非真實的因果效應。
+
+透過本研究採用的因果推論方法，包括傾向分數配對（Propensity Score Matching）、雙重穩健估計（Doubly Robust Estimation）等，估計的處理效應具有更強的因果解釋力，能推斷出學生的社經地位是否真實地對其學業表現產生影響，而非僅僅是因為高 SES 學生恰巧擁有更多有利條件所導致的表面關聯。
+
+在初步分析中，我們分別探討家長教育程度與午餐類型兩個變項對學業成績的影響，結果顯示，這兩項指標均對學業成績具有顯著且正向的影響，顯示家庭背景中的教育資本與物質資源可能對學習表現產生助益。
+
+在中介分析中，我們進一步探討「是否完成備考課程」是否為 SES 影響學業表現的中介路徑。研究結果顯示，儘管完成備考課程對學業表現具正向且顯著的直接影響，但其在 SES 與成績之間的間接效應並不顯著。 這代表 SES 對學業表現的影響主要透過直接路徑發生，備考課程參與並非其主要傳遞機制。因此，即便提升備考資源可帶來學習效益，若未同時解決家庭層級的結構性不平等，仍難以彌補由社經地位所造成的學習落差。
+
+除此之外，本研究亦觀察到性別與種族變項對學業表現的顯著影響。分析結果顯示，女性學生的整體平均成績略低於男性學生，且種族之間的表現亦存在差異，例如 group E 學生相對於其他種族有較高的學業成績。這些差異可能來自於文化期望、語言環境、社會資本或隱性歧視等因素，顯示社會文化背景亦可能深刻影響學習表現，值得未來進一步深入探討。
+
+然而，本研究仍存在限制。首先，SES 僅以家長教育程度與午餐類型作為代理變項，未涵蓋家庭收入、父母職業、居住環境等其他重要的變項，無法完全捕捉家庭社會經濟狀況的全貌，另外，將不同性質變項平均處理，可能掩蓋其中的非線性與交互作用，兩者性質不同，直接平均可能稀釋其個別影響意涵。除此之外，資料中缺乏有關學校層級的資訊，如班級規模、師資素質或學校資源，無法控制學校對學習成果的潛在影響。
+
+因此，未來研究若能結合更完整的 SES 指標與多層次資料（例如家庭與學校層級變項），並使用縱貫性資料追蹤學生的長期發展，將有助於強化因果推論的精準性，且能更深入探討社經地位對學業成績的影響。
+
+# F. Conclusion
+
+本研究的理論貢獻在於在現有研究設計與資料條件的約束下，提供具備因果解釋力的證據，補足過去文獻多以相關性分析為主的限制。我們運用多種因果推論方法，確認家庭社經地位（SES）對學生學業表現的影響為顯著且直接，進一步釐清了哪些具體機制與路徑對學習成果最為關鍵，從而為教育介入政策的設計提供更精確的方向。
+
+根據研究結果，僅透過提升學校內部資源的分配（例如增設補救教學課程或延長課後輔導時間）可能無法解決學習落差，因為學生的學業成績表現在進入學校前，便已受到家庭背景的深刻影響，教育資源的投入雖然重要，但若未能同時補強家庭層面的支持，將難以有效改變學生在起跑點上的不平等。
+
+因此，實現教育機會的實質平等，需要從更廣義的制度設計層面展開整合性政策，例如針對弱勢家庭提供多元的福利措施，包括：營養午餐、交通與學用品補助、免費備考資源、家庭輔導與親職教育等。
+
+家庭社經地位是一個深刻影響學生學業成績的關鍵因子。若要真正實現教育機會平等的目標，必須結合教育、社會福利、公共衛生與社區發展等多層面力量，進行跨領域的政策規劃，才能有效縮短教育落差，實現更公平的學習環境。
+
+# G. Causal Inference Analysis Workflow
+
+因果推論分析工作流程（Causal Inference Analysis Workflow） 是一個結構化的框架，旨在觀察性研究中評估與建立可靠的因果關係。該流程強調理論假設與統計分析的嚴謹性，從基本前提出發，依序進行因果圖建構、混雜因子辨識、效應評估與敏感性分析，最終確立具可信度的因果推論結果。
+
+-   **步驟 0：基本假設**
+
+在開始分析之前，研究者需先確認數項基本假設是否成立，包括：時間順序性（Temporality）、穩定單元處理值假設（SUTVA）、可交換性（Exchangeability） 與正值性（Positivity）。這些假設是進行因果推論的基礎，能確保所觀察的效應可歸因於暴露變項，而非受潛在偏誤或數據結構問題干擾。
+
+-   **步驟 1：構建有向無環圖（DAG）**
+
+第一步是建立有向無環圖（Directed Acyclic Graph, DAG），用以視覺化研究者對變項之間因果關係的假設。DAG 圖有助於釐清因果路徑，辨識潛在混雜因子。圖中呈現暴露變項（X）、中介變項（M）、結果變項（Y）與混雜變項（C）之間的關聯。此步驟具有反覆修正的特性，隨著理解加深可持續優化因果架構。
+
+-   **步驟 2：辨識混雜因子**
+
+根據 DAG，研究者接著需辨識混雜變項（Confounders），即需加以控制的變項，以排除其對結果造成的偏差。符合混雜變項的標準包括：同時影響暴露與結果變項、不在因果通路上、並可阻斷後門路徑（backdoor paths）。這些變項需納入模型控制，以獲得更準確的因果效應估計。
+
+-   **步驟 3：多重效應評估**
+
+為確認推論結果的穩健性，需進行多重效應評估（Multiple Effect Assessment），檢視不同分析方法下的一致性。推薦使用多種方法，如：回歸調整（Regression Adjustment）、傾向分數配對（Propensity Score Matching）、匹配分析（Matching Analysis） 及 分層分析（Stratified Analysis）。若各方法得出的因果效應一致，則可提升結果的信賴度。
+
+-   **步驟 4：敏感性分析**
+
+在獲得初步結果後，需進行敏感性分析（Sensitivity Analysis），評估結果對潛在未測混雜因子的穩健程度。圖中建議使用 E-value 進行量化評估。若 E-value 小於 2，則表示對未測混雜的抵抗力較弱，研究者需對結果保持審慎。
+
+-   **結果穩健性與因果結論**
+
+若研究結果在各種方法下表現一致，且 E-value 顯示具有充分穩健性，則可得出可信的因果效應。若不然，應回溯流程重新修訂 DAG 或重新辨識混雜變項，進行迭代式修正以提升研究有效性。
+
+![](flowchart.png)
+
+# H. References
+
+-   Reardon, S. F. (2011). The widening academic achievement gap between the rich and the poor: New evidence and possible explanations. In G. J. Duncan & R. J. Murnane (Eds.), Whither opportunity? Rising inequality and the uncertain life chances of low-income children (pp. 91–116). Russell Sage Foundation.OECD (2023). PISA 2022 Results (Volume I): The State of Learning and Equity in Education. OECD Publishing. https://doi.org/10.1787/53f23881-en
+
+# I. Appendix (continue part D: Results)
+
+## (1) 家長教育程度對學習成果的影響
+
+### (b) edu -\> language
+
+\par
+
+本研究使用多種方法估計家長教育程度對學生語文成績的處理效應，線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示估計值大多落在 3.8 至 4.4 區間，且除 Horvitz-Thompson 和 Hájek 估計量外，其他方法均達統計顯著性，整體趨勢一致。E-value 分析結果顯示所有方法的 E-value 均在 1.82 至 1.96 之間。這意味著即使有未觀察到的混淆變項，這個結果的穩健性相對較低，顯示我們的估計在某種程度上可能存在可交換性上的限制。
+
+\par
+
+在傾向分數模型中，觀察到大多數樣本的分數集中於 0.31 至 0.48，表示模型對處置機率的區辨力有限，進而影響加權與配對方法的表現。這會影響正向性假設，也可能降低加權或配對等方法的效果。
+
+\par
+
+在配對方法的表現上，Mahalanobis matching 和 PS matching 的平均標準化差異（mean \|SMD\|）從配對前的約 0.03 降至配對後的 0，形式上呈現良好的平衡結果。雖然配對後的標準化差異都降到了 0，不過其實配對前就已經很低，代表在我們這些有限的控制變項條件下，本身就已經達到一定程度的平衡。但由於僅使用性別與種族兩項變項進行配對，所得平衡僅限於這些變項之上，無法涵蓋其他潛在混淆因子（如家庭經濟條件、學校資源等）。
+
+\par
+
+加權方法方面，Horvitz–Thompson 估計量在 outcome 偏態與權重未正規化的影響下，導致信賴區間大幅擴張（\[-4.6, 12.4\]），推論極不穩定；Hájek 估計量雖進行權重正規化，但仍呈現較大的標準誤（2.16）與寬廣的信賴區間（\[-0.4, 8.1\]），穩定性有限。相較之下，doubly robust 方法提供了較為穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r, echo=FALSE}
+covariates <- c("gender", "race", "lunch")
+# m.1: Outcome regression
+m.1 <- lm(language ~ edu + gender + race + lunch, data = df)
+summary(m.1)
+
+vif(m.1)
+mean(m.1$residuals)
+cooksd = cooks.distance(m.1)
+max(cooksd)
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+plot(m.1)
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_model <- glm(edu ~ race + gender + lunch, data = df, family = binomial)
+pscore <- ps_model$fitted.values
+df$pscore <- pscore
+ggplot(df, aes(x = pscore, fill = as.factor(edu))) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("gray60", "steelblue"),
+                    labels = c("Control group", "Treatment group")) +
+  labs(title = "Propensity Score Density by Treatment Group",
+       x = "Propensity Score", fill = "Group")  +
+  xlim(0, 1) +
+  theme_minimal()
+```
+
+#### Mahalanobis matching 
+
+```{r, echo=FALSE}
+# m.2: Mahalanobis matching 
+set.seed(1234) 
+
+race_dummies <- model.matrix(~ race, data = df)[, -1]
+cov_mat <- cbind(
+  gender = df$gender,
+  race_dummies
+)
+
+m.2 <- Match(
+  Y       = df$language,       
+  Tr      = df$edu,    
+  X       = cov_mat,         
+  M       = 1,              
+  replace = FALSE
+)
+
+# 2. Extract ATT point estimate
+maha_est_bs <- as.numeric(m.2$est)
+
+# 3. Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, ]
+  Match(Y = df$language, Tr = df$edu, X = cov_mat,
+        M = 1, replace = FALSE)$est
+}
+
+set.seed(1234)
+boot_out   <- boot(df, statistic = att_maha, R = 1000)
+maha_se_bs <- sd(boot_out$t, na.rm = TRUE)
+ci_lo_bs   <- maha_est_bs - 1.96 * maha_se_bs
+ci_hi_bs   <- maha_est_bs + 1.96 * maha_se_bs
+
+
+
+# 4. Balance diagnostics (mean |SMD|)
+bal2 <- bal.tab(
+  x        = m.2,
+  treat    = df$edu,
+  covs     = cov_mat,
+  un       = TRUE,
+  estimand = "ATT"
+)
+
+mean_pre_no  <- mean(abs(bal2$Balance$Diff.Un),  na.rm = TRUE)
+mean_post_no <- mean(abs(bal2$Balance$Diff.Adj), na.rm = TRUE)
+
+cat("No-replace matching:\n",
+    "  mean |SMD| before/after =",
+    round(mean_pre_no, 3), "/", round(mean_post_no, 3), "\n")
+print(bal2)
+```
+
+#### PS matching 
+
+```{r, echo=FALSE}
+# m.3: Propensity score matching 
+m.3 <- Match(Y = df$language, Tr = df$edu, X = pscore, M = 1,caliper = 0.1) 
+att_ps_boot <- function(data, indices) {
+  d <- data[indices, ] 
+  Match(Y = d$language, Tr = d$edu, X = d$pscore, M = 1, replace = FALSE)$est
+}
+
+set.seed(1234) 
+# 執行 1000 次 bootstrap 
+boot_out <- boot(data = df, statistic = att_ps_boot, R = 1000)
+
+
+# Balance diagnostics before and after PS matching
+bal_psm <- bal.tab(x = m.3, # Match object 
+                   treat = df$edu, # treatment indicator 
+                   covs = df[, covariates], # covariates to assess balance 
+                   un = TRUE, # include unadjusted (pre-match) balance 
+                   estimand = "ATT" # Match() targets ATT by default
+)
+
+# Extract SMDs and compute mean absolute SMD
+diffs <- bal_psm$Balance
+mean_pre  <- mean(abs(diffs$Diff.Un), na.rm = TRUE) # before matching 
+mean_post <- mean(abs(diffs$Diff.Adj), na.rm = TRUE) # after matching
+
+cat("PS matching (ATT): mean |SMD| before/after =", 
+    round(mean_pre, 3), "/", round(mean_post, 3), "\n")
+print(bal_psm)
+```
+
+#### PS stratification
+
+```{r, echo=FALSE}
+# m.4: PS stratification 
+G <- 5 
+breaks <- quantile(df$pscore, probs = (1:(G-1)) / G)
+df$strata <- cut(df$pscore, breaks = c(0, breaks, 1), labels = 1:G)
+table(df$strata)
+
+Neyman_SRE <- function(W, Y, strata.labels) { 
+  n <- length(W) 
+  groups <- unique(strata.labels) 
+  ests <- sapply(groups, function(gg) {
+    wt <- sum(strata.labels == gg) / n 
+    est_g <- mean(Y[strata.labels == gg & W == 1]) - mean(Y[strata.labels == gg & W == 0])
+    var_g <- var(Y[strata.labels == gg & W == 1]) / 
+      sum(strata.labels == gg & W == 1) + 
+      var(Y[strata.labels == gg & W == 0]) / 
+      sum(strata.labels == gg & W == 0) 
+    c(wt, est_g, var_g)
+  }) 
+  neyman.est <- sum(ests[1, ] * ests[2, ]) 
+  neyman.var <- sum(ests[1, ]^2 * ests[3, ]) 
+  c(est = neyman.est, se = sqrt(neyman.var)) 
+}
+
+res4 <- Neyman_SRE(W = df$edu, Y = df$language, strata.labels = df$strata)
+```
+
+#### Regression with PS as covariate
+
+```{r, echo=FALSE}
+# m.5: Regression with PS as covariate
+m.5 <- lm(language ~ edu + pscore, data = df) 
+summary(m.5)
+```
+
+#### Regression weighted by inverse PS
+
+```{r, echo=FALSE}
+# m.6: Regression weighted by inverse PS
+df$w <- ifelse(df$edu == 1, 1 / pscore, 1 / (1 - pscore)) 
+m.6 <- lm(language ~ edu, data = df, weights = w) 
+summary(m.6)
+```
+
+#### Horvitz-Thompson (HT) statistic 
+
+```{r, echo=FALSE}
+# m.7: Horvitz-Thompson (HT) statistic 
+ht_stat <- function(data, i) {
+  d <- data[i, ] 
+  mean(d$edu * d$language / d$pscore - (1 - d$edu) * d$language / (1 - d$pscore))
+}
+
+# Point estimate
+ht_est <- with(df, mean(edu * language / pscore - (1 - edu) * language / (1 - pscore))) 
+cat("HT point estimate =", round(ht_est, 2), "\n")
+
+# Bootstrap for HT
+set.seed(1234) 
+B <- 500 
+boot_ht <- boot(df, statistic = ht_stat, R = B)
+
+# 4. Extract HT SE and print
+ht_se <- sd(boot_ht$t, na.rm = TRUE) 
+
+```
+
+#### Hájek statistic
+
+```{r, echo=FALSE}
+# m.8: Hájek statistic
+hajek_stat <- function(data, i) { 
+  d <- data[i, ] 
+  num <- mean(d$edu * d$language / d$pscore) -
+    mean((1 - d$edu) * d$language / (1 - d$pscore))
+  den <- mean(d$edu / d$pscore) + mean((1 - d$edu) / (1 - d$pscore)) 
+  num / den 
+}
+
+# Point estimate
+w1 <- df$edu / df$pscore # treated weight = 1/e_i 
+w0 <- (1 - df$edu) / (1 - df$pscore) # control weight = 1/(1-e_i)
+
+# 2. Compute weighted means and Hajek estimate
+hajek_est <- sum(df$edu * df$language / df$pscore) / sum(w1) -
+  sum((1 - df$edu) * df$language / (1 - df$pscore)) / sum(w0)
+
+
+
+# Bootstrap for Hajek
+set.seed(1234) 
+boot_hajek <- boot(df, statistic = hajek_stat, R = B)
+
+# Extract Hajek SE and print
+hajek_se <- sd(boot_hajek$t, na.rm = TRUE) 
+
+```
+
+#### IPW with overlap weights
+
+```{r, echo=FALSE}
+# m.9: IPW with overlap weights
+df$w_ow <- ifelse(df$edu == 1, 1 - pscore, pscore) 
+m.9 <- lm(language ~ edu, data = df, weights = w_ow)
+summary(m.9)
+```
+
+#### Doubly robust
+
+```{r, echo=FALSE}
+# m.10: Doubly robust estimator
+z <- df$edu
+y <- df$language
+x <- df[, covariates]
+
+# 1. Estimate propensity score with truncation
+ps_model <- glm(z ~ ., data = data.frame(z, x), family = binomial)
+ps <- predict(ps_model, type = "response")
+ps <- pmin(0.99, pmax(0.01, ps))  # truncation to avoid extreme weights
+
+# 2. Outcome models: separate for treated and control (weighted regression)
+outcome1 <- glm(y ~ ., data = data.frame(x, y), weights = z, family = gaussian())$fitted.values
+outcome0 <- glm(y ~ ., data = data.frame(x, y), weights = 1 - z, family = gaussian())$fitted.values
+
+# 3. Compute doubly robust estimator
+res1 <- y - outcome1
+res0 <- y - outcome0
+dr_est <- mean(outcome1 - outcome0 + z * res1 / ps - (1 - z) * res0 / (1 - ps))
+
+cat("Doubly Robust ATE =", round(dr_est, 2), "\n")
+
+# 4. Define bootstrap function
+dr_boot <- function(data, i) {
+  d <- data[i, ]
+  z <- d$edu
+  y <- d$language
+  x <- d[, covariates]
+  
+  ps_model <- glm(z ~ ., data = data.frame(z, x), family = binomial)
+  ps <- predict(ps_model, type = "response")
+  ps <- pmin(0.99, pmax(0.01, ps))
+  
+  outcome1 <- glm(y ~ ., data = data.frame(x, y), weights = z, family = gaussian())$fitted.values
+  outcome0 <- glm(y ~ ., data = data.frame(x, y), weights = 1 - z, family = gaussian())$fitted.values
+  
+  res1 <- y - outcome1
+  res0 <- y - outcome0
+  
+  mean(outcome1 - outcome0 + z * res1 / ps - (1 - z) * res0 / (1 - ps))
+}
+
+# 5. Bootstrap SE
+set.seed(1234)
+boot_out <- boot(data = df, statistic = dr_boot, R = 1000)
+dr_se <- sd(boot_out$t, na.rm = TRUE)
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t),
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"],
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `edu`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'edu' Estimates Across Methods")
+```
+
+### (c) edu -\> math.score
+
+\par
+
+本研究使用多種方法估計家長教育程度對學生數學成績的處理效應，線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示估計值大多落在 3.2 至 3.99 區間，且除 Horvitz-Thompson 和 Hájek 估計量外，其他方法均達統計顯著性，整體趨勢一致。E-value 分析結果顯示所有方法的 E-value 均在 1.72 至 1.86 之間。這意味著即使有未觀察到的混淆變項，這個結果的穩健性相對較低，顯示我們的估計在某種程度上可能存在可交換性上的限制。
+
+\par
+
+在傾向分數模型中，觀察到大多數樣本的分數集中於 0.31 至 0.48，表示模型對處置機率的區辨力有限，進而影響加權與配對方法的表現。這會影響正向性假設，也可能降低加權或配對等方法的效果。
+
+\par
+
+在配對方法的表現上，Mahalanobis matching 和 PS matching 的平均標準化差異（mean \|SMD\|）從配對前的約 0.03 降至配對後的 0，形式上呈現良好的平衡結果。雖然配對後的標準化差異都降到了 0，不過其實配對前就已經很低，代表在我們這些有限的控制變項條件下，本身就已經達到一定程度的平衡。但由於僅使用性別與種族兩項變項進行配對，所得平衡僅限於這些變項之上，無法涵蓋其他潛在混淆因子（如家庭經濟條件、學校資源等）。
+
+\par
+
+加權方法方面，Horvitz–Thompson 估計量在 outcome 偏態與權重未正規化的影響下，導致信賴區間大幅擴張（\[-4.8, 11.4\]），推論極不穩定；Hájek 估計量雖進行權重正規化，但仍呈現較大的標準誤（2.06）與寬廣的信賴區間（\[-0.8, 7.3\]），穩定性有限。相較之下，doubly robust 方法提供了較為穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r, echo=FALSE}
+covariates <- c("gender", "race", "lunch")
+# m.1: Outcome regression
+m.1 <- lm(math.score ~ edu + gender + race + lunch, data = df)
+summary(m.1)
+
+vif(m.1)
+mean(m.1$residuals)
+cooksd = cooks.distance(m.1)
+max(cooksd)
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+plot(m.1)
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_model <- glm(edu ~ race + gender + lunch, data = df, family = binomial)
+pscore <- ps_model$fitted.values
+df$pscore <- pscore
+ggplot(df, aes(x = pscore, fill = as.factor(edu))) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("gray60", "steelblue"),
+                    labels = c("Control group", "Treatment group")) +
+  labs(title = "Propensity Score Density by Treatment Group",
+       x = "Propensity Score", fill = "Group")  +
+  xlim(0, 1) +
+  theme_minimal()
+```
+
+```{r, echo=FALSE}
+# m.2: Mahalanobis matching 
+set.seed(1234) 
+
+race_dummies <- model.matrix(~ race, data = df)[, -1]
+cov_mat <- cbind(
+  gender = df$gender,
+  race_dummies
+)
+
+m.2 <- Match(
+  Y       = df$math.score,       
+  Tr      = df$edu,    
+  X       = cov_mat,         
+  M       = 1,              
+  replace = FALSE
+)
+
+# 2. Extract ATT point estimate
+maha_est_bs <- as.numeric(m.2$est)
+
+# 3. Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, ]
+  Match(Y = df$math.score, Tr = df$edu, X = cov_mat,
+        M = 1, replace = FALSE)$est
+}
+
+set.seed(1234)
+boot_out   <- boot(df, statistic = att_maha, R = 1000)
+maha_se_bs <- sd(boot_out$t, na.rm = TRUE)
+ci_lo_bs   <- maha_est_bs - 1.96 * maha_se_bs
+ci_hi_bs   <- maha_est_bs + 1.96 * maha_se_bs
+
+
+
+# 4. Balance diagnostics (mean |SMD|)
+bal2 <- bal.tab(
+  x        = m.2,
+  treat    = df$edu,
+  covs     = cov_mat,
+  un       = TRUE,
+  estimand = "ATT"
+)
+
+mean_pre_no  <- mean(abs(bal2$Balance$Diff.Un),  na.rm = TRUE)
+mean_post_no <- mean(abs(bal2$Balance$Diff.Adj), na.rm = TRUE)
+
+cat("No-replace matching:\n",
+    "  mean |SMD| before/after =",
+    round(mean_pre_no, 3), "/", round(mean_post_no, 3), "\n")
+print(bal2)
+```
+
+```{r, echo=FALSE}
+# m.3: Propensity score matching 
+m.3 <- Match(Y = df$math.score, Tr = df$edu, X = pscore, M = 1,caliper = 0.1) 
+att_ps_boot <- function(data, indices) {
+  d <- data[indices, ] 
+  Match(Y = d$math.score, Tr = d$edu, X = d$pscore, M = 1, replace = FALSE)$est
+}
+
+set.seed(1234) 
+# 執行 1000 次 bootstrap 
+boot_out <- boot(data = df, statistic = att_ps_boot, R = 1000)
+
+
+# Balance diagnostics before and after PS matching
+bal_psm <- bal.tab(x = m.3, # Match object 
+                   treat = df$edu, # treatment indicator 
+                   covs = df[, covariates], # covariates to assess balance 
+                   un = TRUE, # include unadjusted (pre-match) balance 
+                   estimand = "ATT" # Match() targets ATT by default
+)
+
+# Extract SMDs and compute mean absolute SMD
+diffs <- bal_psm$Balance
+mean_pre  <- mean(abs(diffs$Diff.Un), na.rm = TRUE) # before matching 
+mean_post <- mean(abs(diffs$Diff.Adj), na.rm = TRUE) # after matching
+
+cat("PS matching (ATT): mean |SMD| before/after =", 
+    round(mean_pre, 3), "/", round(mean_post, 3), "\n")
+print(bal_psm)
+```
+
+```{r, echo=FALSE}
+# m.4: PS stratification 
+G <- 5 
+breaks <- quantile(df$pscore, probs = (1:(G-1)) / G)
+df$strata <- cut(df$pscore, breaks = c(0, breaks, 1), labels = 1:G)
+table(df$strata)
+
+Neyman_SRE <- function(W, Y, strata.labels) { 
+  n <- length(W) 
+  groups <- unique(strata.labels) 
+  ests <- sapply(groups, function(gg) {
+    wt <- sum(strata.labels == gg) / n 
+    est_g <- mean(Y[strata.labels == gg & W == 1]) - mean(Y[strata.labels == gg & W == 0])
+    var_g <- var(Y[strata.labels == gg & W == 1]) / 
+      sum(strata.labels == gg & W == 1) + 
+      var(Y[strata.labels == gg & W == 0]) / 
+      sum(strata.labels == gg & W == 0) 
+    c(wt, est_g, var_g)
+  }) 
+  neyman.est <- sum(ests[1, ] * ests[2, ]) 
+  neyman.var <- sum(ests[1, ]^2 * ests[3, ]) 
+  c(est = neyman.est, se = sqrt(neyman.var)) 
+}
+
+res4 <- Neyman_SRE(W = df$edu, Y = df$math.score, strata.labels = df$strata)
+```
+
+```{r, echo=FALSE}
+# m.5: Regression with PS as covariate
+m.5 <- lm(math.score ~ edu + pscore, data = df) 
+summary(m.5)
+```
+
+```{r, echo=FALSE}
+# m.6: Regression weighted by inverse PS
+df$w <- ifelse(df$edu == 1, 1 / pscore, 1 / (1 - pscore)) 
+m.6 <- lm(math.score ~ edu, data = df, weights = w) 
+summary(m.6)
+```
+
+```{r, echo=FALSE}
+# m.7: Horvitz-Thompson (HT) statistic 
+ht_stat <- function(data, i) {
+  d <- data[i, ] 
+  mean(d$edu * d$math.score / d$pscore - (1 - d$edu) * d$math.score / (1 - d$pscore))
+}
+
+# Point estimate
+ht_est <- with(df, mean(edu * math.score / pscore - (1 - edu) * math.score / (1 - pscore))) 
+cat("HT point estimate =", round(ht_est, 2), "\n")
+
+# Bootstrap for HT
+set.seed(1234) 
+B <- 500 
+boot_ht <- boot(df, statistic = ht_stat, R = B)
+
+# 4. Extract HT SE and print
+ht_se <- sd(boot_ht$t, na.rm = TRUE) 
+
+```
+
+```{r, echo=FALSE}
+# m.8: Hájek statistic
+hajek_stat <- function(data, i) { 
+  d <- data[i, ] 
+  num <- mean(d$edu * d$math.score / d$pscore) -
+    mean((1 - d$edu) * d$math.score / (1 - d$pscore))
+  den <- mean(d$edu / d$pscore) + mean((1 - d$edu) / (1 - d$pscore)) 
+  num / den 
+}
+
+# Point estimate
+w1 <- df$edu / df$pscore # treated weight = 1/e_i 
+w0 <- (1 - df$edu) / (1 - df$pscore) # control weight = 1/(1-e_i)
+
+# 2. Compute weighted means and Hajek estimate
+hajek_est <- sum(df$edu * df$math.score / df$pscore) / sum(w1) -
+  sum((1 - df$edu) * df$math.score / (1 - df$pscore)) / sum(w0)
+
+
+
+# Bootstrap for Hajek
+set.seed(1234) 
+boot_hajek <- boot(df, statistic = hajek_stat, R = B)
+
+# Extract Hajek SE and print
+hajek_se <- sd(boot_hajek$t, na.rm = TRUE) 
+
+```
+
+```{r, echo=FALSE}
+# m.9: IPW with overlap weights
+df$w_ow <- ifelse(df$edu == 1, 1 - pscore, pscore) 
+m.9 <- lm(math.score ~ edu, data = df, weights = w_ow)
+summary(m.9)
+```
+
+```{r, echo=FALSE}
+# m.10: Doubly robust estimator
+z <- df$edu
+y <- df$math.score
+x <- df[, covariates]
+
+# 1. Estimate propensity score with truncation
+ps_model <- glm(z ~ ., data = data.frame(z, x), family = binomial)
+ps <- predict(ps_model, type = "response")
+ps <- pmin(0.99, pmax(0.01, ps))  # truncation to avoid extreme weights
+
+# 2. Outcome models: separate for treated and control (weighted regression)
+outcome1 <- glm(y ~ ., data = data.frame(x, y), weights = z, family = gaussian())$fitted.values
+outcome0 <- glm(y ~ ., data = data.frame(x, y), weights = 1 - z, family = gaussian())$fitted.values
+
+# 3. Compute doubly robust estimator
+res1 <- y - outcome1
+res0 <- y - outcome0
+dr_est <- mean(outcome1 - outcome0 + z * res1 / ps - (1 - z) * res0 / (1 - ps))
+
+cat("Doubly Robust ATE =", round(dr_est, 2), "\n")
+
+# 4. Define bootstrap function
+dr_boot <- function(data, i) {
+  d <- data[i, ]
+  z <- d$edu
+  y <- d$math.score
+  x <- d[, covariates]
+  
+  ps_model <- glm(z ~ ., data = data.frame(z, x), family = binomial)
+  ps <- predict(ps_model, type = "response")
+  ps <- pmin(0.99, pmax(0.01, ps))
+  
+  outcome1 <- glm(y ~ ., data = data.frame(x, y), weights = z, family = gaussian())$fitted.values
+  outcome0 <- glm(y ~ ., data = data.frame(x, y), weights = 1 - z, family = gaussian())$fitted.values
+  
+  res1 <- y - outcome1
+  res0 <- y - outcome0
+  
+  mean(outcome1 - outcome0 + z * res1 / ps - (1 - z) * res0 / (1 - ps))
+}
+
+# 5. Bootstrap SE
+set.seed(1234)
+boot_out <- boot(data = df, statistic = dr_boot, R = 1000)
+dr_se <- sd(boot_out$t, na.rm = TRUE)
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t),
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"],
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "edu") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error,
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se,
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `edu`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'edu' Estimates Across Methods")
+```
+
+## (2) 學生午餐類型對學業成績的影響
+
+### (b) lunch -\> language
+
+\par
+
+這個小節旨在估計午餐類型對學生語文成績的處理效應。線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示各方法的估計值集中在 7.4 至 7.6 區間，效應量明顯高於家長教育程度的影響。除 Horvitz-Thompson 估計量外，其他方法均達統計顯著性。而 E-value 約在 2.54 到 2.57，代表即使有未觀察到的混淆變項，這個結果也相對穩健（相較於教育程度具有更高的穩健性），顯示我們的估計具有一定程度的可交換性。
+
+\par
+
+雖然處理組與控制組的傾向分數有重疊，但分數範圍相對狹窄，落在 0.57 到 0.73 之間，表示共變項對區分是否接受標準午餐的能力有限。這會影響正向性假設，也可能降低加權或配對等方法的效果。
+
+\par
+
+在配對方法的表現上，Mahalanobis matching 和 PS matching 的平均標準化差異（mean \|SMD\|）從配對前的 0.016 降至配對後的 0。由於配對前的 SMD 本身已相當接近 0，此結果主要反映了在有限協變項條件下的平衡狀況。
+
+\par
+
+加權方法方面，Horvitz-Thompson 估計量雖仍出現較大的標準誤（4.54）與寬廣信賴區間（\[-1.5, 16.3\]），但相較於教育程度變項的分析結果，不穩定程度有所改善。Hájek 估計量的標準誤（2.25）與信賴區間（\[3.0, 11.8\]）同樣顯示改善趨勢，而 doubly robust 方法持續提供穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r,  warning=FALSE, message=FALSE, echo=FALSE}
+covariates <- c("gender","race","edu")
+
+# assemble pure-numeric covariate matrix
+cov_mat <- cbind(
+  gender = df$gender,
+  edu    = df$edu,
+  race_dummies
+)
+
+# --- (1) Outcome regression: lunch → language -------------------------------
+m.1 <- lm(language ~ lunch + gender + race + edu, data=df)
+print(summary(m.1))
+print(vif(m.1))
+print(mean(m.1$residuals))
+print(max(cooks.distance(m.1)))
+par(mfrow=c(2,2), mar=c(4,4,2,1)); plot(m.1)
+
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_mod <- glm(lunch ~ gender + race + edu, data=df, family=binomial)
+df$pscore <- predict(ps_mod, type="response")
+
+ggplot(df, aes(x = pscore, fill = as.factor(lunch))) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("gray60", "steelblue"),
+                    labels = c("Control group", "Treatment group")) +
+  labs(title = "Propensity Score Density by Treatment Group",
+       x = "Propensity Score", fill = "Group") + 
+  xlim(0, 1) +
+  theme_minimal()
+```
+
+```{r, echo=FALSE}
+# --- (2) Mahalanobis matching -----------------------------------------------
+set.seed(1234)
+m.2 <- Match(
+  Y       = df$language,
+  Tr      = df$lunch,
+  X       = cov_mat,
+  M       = 1,
+  replace = TRUE
+)
+print(summary(m.2))
+
+# 2. Extract ATT point estimate
+maha_est_bs <- as.numeric(m.2$est)
+
+# 3. Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, ]
+  Match(Y = df$language, Tr = df$edu, X = cov_mat,
+        M = 1, replace = FALSE)$est
+}
+
+set.seed(1234)
+boot_out   <- boot(df, statistic = att_maha, R = 1000)
+maha_se_bs <- sd(boot_out$t, na.rm = TRUE)
+ci_lo_bs   <- maha_est_bs - 1.96 * maha_se_bs
+ci_hi_bs   <- maha_est_bs + 1.96 * maha_se_bs
+
+
+# balance
+bal2 <- bal.tab(m.2, treat=df$lunch, covs=cov_mat, un=TRUE, estimand="ATT")
+cat("Mean |SMD| before/after =", 
+    round(mean(abs(bal2$Balance$Diff.Un)),3),"/",
+    round(mean(abs(bal2$Balance$Diff.Adj)),3),"\n")
+print(bal2)
+
+# --- (3) Propensity score matching -----------------------------------------
+set.seed(1234)
+m.3 <- Match(Y=df$language, Tr=df$lunch, X=df$pscore, M=1)
+cat("PSM ATT =",round(m.3$est,2),"\n")
+boot_ps <- boot(df, statistic=function(d,i){
+  di<-d[i,]; Match(Y=di$language,Tr=di$lunch,X=di$pscore,M=1,replace=FALSE)$est
+}, R=1000)
+
+bal_ps <- bal.tab(m.3, treat=df$lunch, covs=df[,covariates], un=TRUE, estimand="ATT")
+cat("Mean |SMD| PSM before/after =",
+    round(mean(abs(bal_ps$Balance$Diff.Un)),3),"/",
+    round(mean(abs(bal_ps$Balance$Diff.Adj)),3),"\n")
+print(bal_ps)
+
+# --- (4) PS stratification (5 strata) ---------------------------------------
+G<-5
+brks<-quantile(df$pscore, probs=(1:(G-1))/G)
+df$strata<-cut(df$pscore, breaks=c(0,brks,1), labels=1:G)
+Neyman_SRE<-function(W,Y,strata){
+  n<-length(W); gs<-unique(strata)
+  ests<-sapply(gs,function(g){
+    wt<-sum(strata==g)/n
+    eg<-mean(Y[strata==g & W==1]) - mean(Y[strata==g & W==0])
+    vg<-var(Y[strata==g & W==1])/sum(strata==g & W==1)+
+      var(Y[strata==g & W==0])/sum(strata==g & W==0)
+    c(wt,eg,vg)
+  })
+  e<-sum(ests[1,]*ests[2,]); v<-sum(ests[1,]^2*ests[3,])
+  c(est=e,se=sqrt(v))
+}
+res4<-Neyman_SRE(df$lunch, df$language, df$strata)
+
+
+# --- (5) Regression with PS as covariate -----------------------------------
+m.5<-lm(language ~ lunch + pscore, data=df)
+print(summary(m.5))
+
+# --- (6) IPW regression ----------------------------------------------------
+df$w<-ifelse(df$lunch==1,1/df$pscore,1/(1-df$pscore))
+m.6<-lm(language ~ lunch, data=df, weights=w)
+print(summary(m.6))
+
+# --- (7) Horvitz–Thompson estimator ----------------------------------------
+ht_stat<-function(d,i){
+  di<-d[i,]; mean(di$lunch*di$language/di$pscore - (1-di$lunch)*di$language/(1-di$pscore))
+}
+ht_est<-mean(df$lunch*df$language/df$pscore - (1-df$lunch)*df$language/(1-df$pscore))
+boot_ht<-boot(df,statistic=ht_stat,R=500)
+ht_se<-sd(boot_ht$t,na.rm=TRUE)
+
+
+# --- (8) Hájek estimator ---------------------------------------------------
+hajek_stat<-function(d,i){
+  di<-d[i,]
+  num<-mean(di$lunch*di$language/di$pscore)-mean((1-di$lunch)*di$language/(1-di$pscore))
+  den<-mean(di$lunch/di$pscore)+mean((1-di$lunch)/(1-di$pscore))
+  num/den
+}
+hajek_est<-sum(df$lunch*df$language/df$pscore)/sum(df$lunch/df$pscore) -
+  sum((1-df$lunch)*df$language/(1-df$pscore))/sum((1-df$lunch)/(1-df$pscore))
+boot_hajek<-boot(df,statistic=hajek_stat,R=500)
+hajek_se<-sd(boot_hajek$t,na.rm=TRUE)
+
+
+# --- (9) Overlap weights (ATO) ---------------------------------------------
+df$w_ow<-ifelse(df$lunch==1,1-df$pscore, df$pscore)
+m.9<-lm(language ~ lunch, data=df, weights=w_ow)
+print(summary(m.9))
+
+# --- (10) Doubly Robust estimator -----------------------------------------
+z<-df$lunch; y<-df$language; x<-df[,covariates]
+ps_dr<-pmin(0.99,pmax(0.01,predict(glm(z~.,data=data.frame(z,x),family=binomial),type="response")))
+out1<-lm(y[z==1]~.,data=data.frame(y=y[z==1],x[z==1,])); out0<-lm(y[z==0]~.,data=data.frame(y=y[z==0],x[z==0,]))
+y1hat<-predict(out1,newdata=x); y0hat<-predict(out0,newdata=x)
+dr_est<-mean(y1hat-y0hat + z*(y-y1hat)/ps_dr - (1-z)*(y-y0hat)/(1-ps_dr))
+cat("DR ATE =",round(dr_est,2),"\n")
+dr_boot<-function(d,i){
+  di<-d[i,]; z_i<-di$lunch; y_i<-di$language; x_i<-di[i,covariates]
+  ps_i<-pmin(0.99,pmax(0.01,predict(glm(z_i~.,data=data.frame(z_i,x_i),family=binomial),type="response")))
+  o1<-lm(y_i[z_i==1]~.,data=data.frame(y_i=y_i[z_i==1],x_i[z_i==1,]))
+  o0<-lm(y_i[z_i==0]~.,data=data.frame(y_i=y_i[z_i==0],x_i[z_i==0,]))
+  y1p<-predict(o1,newdata=x_i); y0p<-predict(o0,newdata=x_i)
+  mean(y1p-y0p + z_i*(y_i-y1p)/ps_i - (1-z_i)*(y_i-y0p)/(1-ps_i))
+}
+boot_dr<-boot(df,statistic=dr_boot,R=1000)
+dr_se<-sd(boot_dr$t,na.rm=TRUE)
+ci_lo<-dr_est-1.96*dr_se; ci_hi<-dr_est+1.96*dr_se
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error, evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2])
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t) , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"]
+  , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2])
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2])
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `lunch`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'lunch' Estimates Across Methods")
+```
+
+### (c) lunch -\> math.score
+
+\par
+
+這個小節旨在估計午餐類型對學生數學成績的處理效應。線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示各方法的估計值集中在 10.65 至 10.72 區間，效應量明顯高於家長教育程度的影響，且均達統計顯著性。而 E-value 約在 3.19 到 3.22，代表即使有未觀察到的混淆變項，這個結果也相對穩健（相較於教育程度具有更高的穩健性），顯示我們的估計具有一定程度的可交換性。
+
+\par
+
+雖然處理組與控制組的傾向分數有重疊，但分數範圍相對狹窄，落在 0.57 到 0.73 之間，表示共變項對區分是否接受標準午餐的能力有限。這會影響正向性假設，也可能降低加權或配對等方法的效果。
+
+\par
+
+在配對方法的表現上，Mahalanobis matching 和 PS matching 的平均標準化差異（mean \|SMD\|）從配對前的 0.016 降至配對後的 0。由於配對前的 SMD 本身已相當接近 0，此結果主要反映了在有限協變項條件下的平衡狀況。
+
+\par
+
+加權方法方面，Horvitz-Thompson 估計量雖仍出現較大的標準誤（4.35）與寬廣信賴區間（\[2.2, 19.2\]），但相較於教育程度變項的分析結果，不穩定程度有所改善。Hájek 估計量的標準誤（2.17）與信賴區間（\[6.4, 14.9\]）同樣顯示改善趨勢，而 doubly robust 方法持續提供穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+covariates <- c("gender","race","edu")
+
+# assemble pure-numeric covariate matrix
+cov_mat <- cbind(
+  gender = df$gender,
+  edu    = df$edu,
+  race_dummies
+)
+
+# --- (1) Outcome regression: lunch → math.score -------------------------------
+m.1 <- lm(math.score ~ lunch + gender + race + edu, data=df)
+print(summary(m.1))
+print(vif(m.1))
+print(mean(m.1$residuals))
+print(max(cooks.distance(m.1)))
+par(mfrow=c(2,2), mar=c(4,4,2,1)); plot(m.1)
+
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_mod <- glm(lunch ~ gender + race + edu, data=df, family=binomial)
+df$pscore <- predict(ps_mod, type="response")
+
+ggplot(df, aes(x = pscore, fill = as.factor(lunch))) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("gray60", "steelblue"),
+                    labels = c("Control group", "Treatment group")) +
+  labs(title = "Propensity Score Density by Treatment Group",
+       x = "Propensity Score", fill = "Group") + 
+  xlim(0, 1) +
+  theme_minimal()
+```
+
+```{r, echo=FALSE}
+# --- (2) Mahalanobis matching -----------------------------------------------
+set.seed(1234)
+m.2 <- Match(
+  Y       = df$math.score,
+  Tr      = df$lunch,
+  X       = cov_mat,
+  M       = 1,
+  replace = TRUE
+)
+print(summary(m.2))
+
+# 2. Extract ATT point estimate
+maha_est_bs <- as.numeric(m.2$est)
+
+# 3. Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, ]
+  Match(Y = df$math.score, Tr = df$edu, X = cov_mat,
+        M = 1, replace = FALSE)$est
+}
+
+set.seed(1234)
+boot_out   <- boot(df, statistic = att_maha, R = 1000)
+maha_se_bs <- sd(boot_out$t, na.rm = TRUE)
+ci_lo_bs   <- maha_est_bs - 1.96 * maha_se_bs
+ci_hi_bs   <- maha_est_bs + 1.96 * maha_se_bs
+
+
+# balance
+bal2 <- bal.tab(m.2, treat=df$lunch, covs=cov_mat, un=TRUE, estimand="ATT")
+cat("Mean |SMD| before/after =", 
+    round(mean(abs(bal2$Balance$Diff.Un)),3),"/",
+    round(mean(abs(bal2$Balance$Diff.Adj)),3),"\n")
+print(bal2)
+
+# --- (3) Propensity score matching -----------------------------------------
+set.seed(1234)
+m.3 <- Match(Y=df$math.score, Tr=df$lunch, X=df$pscore, M=1)
+cat("PSM ATT =",round(m.3$est,2),"\n")
+boot_ps <- boot(df, statistic=function(d,i){
+  di<-d[i,]; Match(Y=di$math.score,Tr=di$lunch,X=di$pscore,M=1,replace=FALSE)$est
+}, R=1000)
+
+bal_ps <- bal.tab(m.3, treat=df$lunch, covs=df[,covariates], un=TRUE, estimand="ATT")
+cat("Mean |SMD| PSM before/after =",
+    round(mean(abs(bal_ps$Balance$Diff.Un)),3),"/",
+    round(mean(abs(bal_ps$Balance$Diff.Adj)),3),"\n")
+print(bal_ps)
+
+# --- (4) PS stratification (5 strata) ---------------------------------------
+G<-5
+brks<-quantile(df$pscore, probs=(1:(G-1))/G)
+df$strata<-cut(df$pscore, breaks=c(0,brks,1), labels=1:G)
+Neyman_SRE<-function(W,Y,strata){
+  n<-length(W); gs<-unique(strata)
+  ests<-sapply(gs,function(g){
+    wt<-sum(strata==g)/n
+    eg<-mean(Y[strata==g & W==1]) - mean(Y[strata==g & W==0])
+    vg<-var(Y[strata==g & W==1])/sum(strata==g & W==1)+
+      var(Y[strata==g & W==0])/sum(strata==g & W==0)
+    c(wt,eg,vg)
+  })
+  e<-sum(ests[1,]*ests[2,]); v<-sum(ests[1,]^2*ests[3,])
+  c(est=e,se=sqrt(v))
+}
+res4<-Neyman_SRE(df$lunch, df$math.score, df$strata)
+
+
+# --- (5) Regression with PS as covariate -----------------------------------
+m.5<-lm(math.score ~ lunch + pscore, data=df)
+print(summary(m.5))
+
+# --- (6) IPW regression ----------------------------------------------------
+df$w<-ifelse(df$lunch==1,1/df$pscore,1/(1-df$pscore))
+m.6<-lm(math.score ~ lunch, data=df, weights=w)
+print(summary(m.6))
+
+# --- (7) Horvitz–Thompson estimator ----------------------------------------
+ht_stat<-function(d,i){
+  di<-d[i,]; mean(di$lunch*di$math.score/di$pscore - (1-di$lunch)*di$math.score/(1-di$pscore))
+}
+ht_est<-mean(df$lunch*df$math.score/df$pscore - (1-df$lunch)*df$math.score/(1-df$pscore))
+boot_ht<-boot(df,statistic=ht_stat,R=500)
+ht_se<-sd(boot_ht$t,na.rm=TRUE)
+
+
+# --- (8) Hájek estimator ---------------------------------------------------
+hajek_stat<-function(d,i){
+  di<-d[i,]
+  num<-mean(di$lunch*di$math.score/di$pscore)-mean((1-di$lunch)*di$math.score/(1-di$pscore))
+  den<-mean(di$lunch/di$pscore)+mean((1-di$lunch)/(1-di$pscore))
+  num/den
+}
+hajek_est<-sum(df$lunch*df$math.score/df$pscore)/sum(df$lunch/df$pscore) -
+  sum((1-df$lunch)*df$math.score/(1-df$pscore))/sum((1-df$lunch)/(1-df$pscore))
+boot_hajek<-boot(df,statistic=hajek_stat,R=500)
+hajek_se<-sd(boot_hajek$t,na.rm=TRUE)
+
+
+# --- (9) Overlap weights (ATO) ---------------------------------------------
+df$w_ow<-ifelse(df$lunch==1,1-df$pscore, df$pscore)
+m.9<-lm(math.score ~ lunch, data=df, weights=w_ow)
+print(summary(m.9))
+
+# --- (10) Doubly Robust estimator -----------------------------------------
+z<-df$lunch; y<-df$math.score; x<-df[,covariates]
+ps_dr<-pmin(0.99,pmax(0.01,predict(glm(z~.,data=data.frame(z,x),family=binomial),type="response")))
+out1<-lm(y[z==1]~.,data=data.frame(y=y[z==1],x[z==1,])); out0<-lm(y[z==0]~.,data=data.frame(y=y[z==0],x[z==0,]))
+y1hat<-predict(out1,newdata=x); y0hat<-predict(out0,newdata=x)
+dr_est<-mean(y1hat-y0hat + z*(y-y1hat)/ps_dr - (1-z)*(y-y0hat)/(1-ps_dr))
+cat("DR ATE =",round(dr_est,2),"\n")
+dr_boot<-function(d,i){
+  di<-d[i,]; z_i<-di$lunch; y_i<-di$math.score; x_i<-di[i,covariates]
+  ps_i<-pmin(0.99,pmax(0.01,predict(glm(z_i~.,data=data.frame(z_i,x_i),family=binomial),type="response")))
+  o1<-lm(y_i[z_i==1]~.,data=data.frame(y_i=y_i[z_i==1],x_i[z_i==1,]))
+  o0<-lm(y_i[z_i==0]~.,data=data.frame(y_i=y_i[z_i==0],x_i[z_i==0,]))
+  y1p<-predict(o1,newdata=x_i); y0p<-predict(o0,newdata=x_i)
+  mean(y1p-y0p + z_i*(y_i-y1p)/ps_i - (1-z_i)*(y_i-y0p)/(1-ps_i))
+}
+boot_dr<-boot(df,statistic=dr_boot,R=1000)
+dr_se<-sd(boot_dr$t,na.rm=TRUE)
+ci_lo<-dr_est-1.96*dr_se; ci_hi<-dr_est+1.96*dr_se
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error, evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2])
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t) , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"]
+  , evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2])
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2])
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "lunch") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `lunch`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'lunch' Estimates Across Methods")
+```
+
+## (3) 有無完成備考課程對成績的影響
+
+### (b) course -\> language
+
+\par
+
+本小節分析有無完成備考課程對學生語文成績的處理效應。線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示各方法的估計值主要分佈在 8.8 至 10.7 區間，其中配對方法 (Mahalanobis matching, PS matching, PS stratification, & Hájek) 呈現較高的效應估計（10.65 - 10.7），而其他方法多集中在 8.8 左右，且均達統計顯著性。而 E-value 介於 2.84 至 3.29 之間，代表即使有未觀察到的混淆變項，這個結果也相對穩健（相較於教育程度具有更高的穩健性），顯示我們的估計具有一定程度的可交換性。
+
+\par
+
+傾向分數分佈區間依然很窄，大約落在 0.3 到 0.45。雖然兩組的分佈有重疊，但這代表共變項無法很好地預測學生是否完成備考課程，會影響平衡效果，也代表正向性可能受到挑戰。
+
+\par
+
+在配對方法的平衡診斷上，Mahalanobis matching 的平均標準化差異（mean \|SMD\|）從配對前的 0.019 降至配對後的 0，而 PS matching 從 0.017 降至 0.004，兩者均達到良好的平衡效果。由於配對前的 SMD 本身已相當接近 0，此結果反映了在現有協變項控制下的平衡狀況。由於 SMD 都從原本接近 0 降到 0，幾乎完全平衡，表示在目前的控制變項條件下，確實可以讓兩組學生在基線上達成比較公平的比較。
+
+\par
+
+加權方法表現方面，Horvitz–Thompson 估計量出現較大的標準誤（4.35）與寬廣信賴區間（\[0.3, 17.4\]），顯示估計不穩定。Hájek 估計量雖進行權重正規化，標準誤（2.17）與信賴區間（\[6.4, 14.9\]）仍較其他方法為大。相較之下，doubly robust 和其他迴歸基礎方法提供了更為穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE, echo=FALSE}
+# Define covariates for course treatment
+treatment <- "course"
+covariates <- c("edu", "lunch", "gender", "race")
+
+# Prepare pure-numeric covariate matrix: edu, lunch, gender already 0/1; race -> dummy
+race_dummies <- model.matrix(~ race, data = df)[, -1]
+cov_mat <- cbind(
+  edu    = df$edu,
+  lunch  = df$lunch,
+  gender = df$gender,
+  race_dummies
+)
+
+# (1) Outcome regression: course → language
+m.1 <- lm(language ~ course + edu + lunch + gender + race, data = df)
+print(summary(m.1))
+print(vif(m.1))
+print(mean(m.1$residuals))
+print(max(cooks.distance(m.1)))
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1)); plot(m.1)
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_mod <- glm(course ~ edu + lunch + gender + race, data = df, family = binomial)
+df$pscore <- predict(ps_mod, type = "response")
+ggplot(df, aes(x = pscore, fill = as.factor(course))) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "steelblue"),
+                      labels = c("Control group", "Treatment group")) +
+    labs(title = "Propensity Score Density by Treatment Group",
+         x = "Propensity Score", fill = "Group")  +
+  xlim(0, 1) +
+    theme_minimal()
+```
+
+```{r, echo=FALSE}
+# (2) Mahalanobis matching: course as treatment
+set.seed(1234)
+match_maha <- Match(
+  Y       = df$language,
+  Tr      = df$course,
+  X       = cov_mat,
+  M       = 1,
+  replace = TRUE
+)
+print(summary(match_maha))
+
+# Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, , drop = FALSE]
+  # preserve race levels
+  d$race <- factor(d$race, levels = levels(df$race))
+  Xd <- model.matrix(~ edu + lunch + gender + race, data = d)[, -1]
+  Match(Y = d$language, Tr = d$course, X = Xd, M = 1, replace = FALSE)$est
+}
+boot_maha <- boot(df, statistic = att_maha, R = 1000)
+maha_est <- match_maha$est
+maha_se  <- sd(boot_maha$t, na.rm = TRUE)
+ci_maha <- maha_est + c(-1.96, 1.96) * maha_se
+
+
+# Balance diagnostics
+bal_maha <- bal.tab(match_maha, treat = df$course, covs = cov_mat, un = TRUE, estimand = "ATT")
+cat("Mean |SMD| before/after =",
+    round(mean(abs(bal_maha$Balance$Diff.Un)), 3), "/",
+    round(mean(abs(bal_maha$Balance$Diff.Adj)), 3), "\n")
+print(bal_maha)
+
+# (3) Propensity score matching
+ps_mod <- glm(course ~ edu + lunch + gender + race, data = df, family = binomial)
+df$pscore <- predict(ps_mod, type = "response")
+set.seed(1234)
+match_ps <- Match(Y = df$language, Tr = df$course, X = df$pscore, M = 1)
+cat("PSM ATT =", round(match_ps$est, 2), "\n")
+# bootstrap
+boot_ps <- boot(df, statistic = function(d, i) {
+  di <- d[i, , drop = FALSE]
+  Match(Y = di$language, Tr = di$course, X = di$pscore, M = 1, replace = FALSE)$est
+}, R = 1000)
+
+bal_ps <- bal.tab(match_ps, treat = df$course, covs = df[, covariates], un = TRUE, estimand = "ATT")
+cat("Mean |SMD| PSM before/after =",
+    round(mean(abs(bal_ps$Balance$Diff.Un)), 3), "/",
+    round(mean(abs(bal_ps$Balance$Diff.Adj)), 3), "\n")
+print(bal_ps)
+
+# (4) PS stratification (5 strata)
+G <- 5
+brks <- quantile(df$pscore, probs = (1:(G-1)) / G)
+df$strata <- cut(df$pscore, breaks = c(0, brks, 1), labels = 1:G)
+strat_res <- t(sapply(1:G, function(g) {
+  idx <- df$strata == g
+  c(weight = sum(idx)/nrow(df),
+    diff   = mean(df$language[idx & df$course==1]) - mean(df$language[idx & df$course==0]),
+    var    = var(df$language[idx & df$course==1]) / sum(idx & df$course==1) +
+      var(df$language[idx & df$course==0]) / sum(idx & df$course==0)
+  )
+}))
+ATE_strat <- sum(strat_res[,1] * strat_res[,2])
+SE_strat  <- sqrt(sum(strat_res[,1]^2 * strat_res[,3]))
+
+
+# (5) Regression with PS covariate
+m.5 <- lm(language ~ course + pscore, data = df)
+print(summary(m.5))
+
+# (6) IPW regression
+df$w <- ifelse(df$course==1, 1/df$pscore, 1/(1-df$pscore))
+m.6 <- lm(language ~ course, data = df, weights = w)
+print(summary(m.6))
+
+# (7) Horvitz–Thompson estimator
+ht_fun <- function(d,i) mean(d[i,]$course * d[i,]$language / d[i,]$pscore - (1-d[i,]$course)*d[i,]$language/(1-d[i,]$pscore))
+ht_est <- ht_fun(df, 1:nrow(df))
+b_ht <- boot(df, statistic=ht_fun, R=500)
+
+
+# (8) Hajek estimator
+hajek_fun <- function(d,i) {
+  di <- d[i,]
+  num <- mean(di$course*di$language/di$pscore) - mean((1-di$course)*di$language/(1-di$pscore))
+  den <- mean(di$course/di$pscore) + mean((1-di$course)/(1-di$pscore))
+  num/den
+}
+# hj_est <- hijek <- NA # placeholder; can implement similarly
+
+
+# (9) Overlap weights (ATO)
+df$w_ow <- ifelse(df$course==1, 1-df$pscore, df$pscore)
+m.9 <- lm(language ~ course, data=df, weights=w_ow)
+print(summary(m.9))
+
+# (10) Doubly Robust estimator
+x_df <- as.data.frame(cov_mat)
+z <- df$course;y<-df$language
+ps_dr <- pmin(0.99,pmax(0.01,predict(glm(z~.,data=data.frame(z,x_df),family=binomial),type="response")))
+out1 <- lm(y[z==1]~.,data=data.frame(y=y[z==1],x_df[z==1,]))
+out0 <- lm(y[z==0]~.,data=data.frame(y=y[z==0],x_df[z==0,]))
+y1hat<-predict(out1,newdata=x_df);y0hat<-predict(out0,newdata=x_df)
+dr_est<-mean(y1hat-y0hat+z*(y-y1hat)/ps_dr-(1-z)*(y-y0hat)/(1-ps_dr))
+
+dr_boot <- function(d,i){di<-d[i,];z_i<-di$course;y_i<-di$language;x_i<-as.data.frame(cov_mat[i,]);ps_i<-pmin(0.99,pmax(0.01,predict(glm(z_i~.,data=data.frame(z_i,x_i),family=binomial),type="response")));o1<-lm(y_i[z_i==1]~.,data=data.frame(y_i=y_i[z_i==1],x_i[z_i==1,]));o0<-lm(y_i[z_i==0]~.,data=data.frame(y_i=y_i[z_i==0],x_i[z_i==0,]));y1p<-predict(o1,newdata=x_i);y0p<-predict(o0,newdata=x_i);mean(y1p-y0p+z_i*(y_i-y1p)/ps_i-(1-z_i)*(y_i-y0p)/(1-ps_i))}
+b_dr<-boot(df,statistic=dr_boot,R=1000)
+dr_se<-sd(b_dr$t,na.rm=TRUE)
+ci<-dr_est+c(-1.96,1.96)*dr_se
+
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t),
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2])
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"], 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$language))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `course`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'course' Estimates Across Methods")
+```
+
+### (c) course -\> math.score
+
+\par
+
+本小節分析有無完成備考課程對學生數學成績的處理效應。線性模型診斷顯示模型假設均獲得滿足，Cook's distance 均小於 0.5，表示無明顯的異常值影響。結果顯示各方法的估計值主要分佈在 5.5 至 10.7 區間，其中配對方法 (Mahalanobis matching, PS matching, PS stratification, & Hájek) 呈現較高的效應估計（10.65 - 10.7），而其他方法多集中在 5.5 左右。除 Horvitz–Thompson 估計量外，其他方法均達統計顯著性。而 E-value 介於 2.13 至 3.21 之間，代表即使有未觀察到的混淆變項，這個結果也相對穩健（相較於教育程度具有更高的穩健性），顯示我們的估計具有一定程度的可交換性。
+
+\par
+
+傾向分數分佈區間依然很窄，大約落在 0.3 到 0.45。雖然兩組的分佈有重疊，但這代表共變項無法很好地預測學生是否完成備考課程，會影響平衡效果，也代表正向性可能受到挑戰。
+
+\par
+
+在配對方法的平衡診斷上，Mahalanobis matching 的平均標準化差異（mean \|SMD\|）從配對前的 0.019 降至配對後的 0，而 PS matching 從 0.017 降至 0.004，兩者均達到良好的平衡效果。由於配對前的 SMD 本身已相當接近 0，此結果反映了在現有協變項控制下的平衡狀況。由於 SMD 都從原本接近 0 降到 0，幾乎完全平衡，表示在目前的控制變項條件下，確實可以讓兩組學生在基線上達成比較公平的比較。
+
+\par
+
+加權方法表現方面，Horvitz–Thompson 估計量出現較大的標準誤（4.35）與寬廣信賴區間（\[-3.0, 14.1\]），顯示估計不穩定。Hájek 估計量雖進行權重正規化，標準誤（2.17）與信賴區間（\[6.4, 14.9\]）仍較其他方法為大。相較之下，doubly robust 和其他迴歸基礎方法提供了更為穩定的估計結果。
+
+#### outcome regression diagnosis
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE, echo=FALSE}
+# Define covariates for course treatment
+treatment <- "course"
+covariates <- c("edu", "lunch", "gender", "race")
+
+# Prepare pure-numeric covariate matrix: edu, lunch, gender already 0/1; race -> dummy
+race_dummies <- model.matrix(~ race, data = df)[, -1]
+cov_mat <- cbind(
+  edu    = df$edu,
+  lunch  = df$lunch,
+  gender = df$gender,
+  race_dummies
+)
+
+# (1) Outcome regression: course → math.score
+m.1 <- lm(math.score ~ course + edu + lunch + gender + race, data = df)
+print(summary(m.1))
+print(vif(m.1))
+print(mean(m.1$residuals))
+print(max(cooks.distance(m.1)))
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1)); plot(m.1)
+```
+
+#### Propensity score 計算
+
+```{r, echo=FALSE}
+ps_mod <- glm(course ~ edu + lunch + gender + race, data = df, family = binomial)
+df$pscore <- predict(ps_mod, type = "response")
+ggplot(df, aes(x = pscore, fill = as.factor(course))) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("gray60", "steelblue"),
+                    labels = c("Control group", "Treatment group")) +
+  labs(title = "Propensity Score Density by Treatment Group",
+       x = "Propensity Score", fill = "Group")  +
+  xlim(0, 1) +
+  theme_minimal()
+```
+
+```{r, echo=FALSE}
+# (2) Mahalanobis matching: course as treatment
+set.seed(1234)
+match_maha <- Match(
+  Y       = df$math.score,
+  Tr      = df$course,
+  X       = cov_mat,
+  M       = 1,
+  replace = TRUE
+)
+print(summary(match_maha))
+
+# Bootstrap SE for ATT
+att_maha <- function(data, i) {
+  d <- data[i, , drop = FALSE]
+  # preserve race levels
+  d$race <- factor(d$race, levels = levels(df$race))
+  Xd <- model.matrix(~ edu + lunch + gender + race, data = d)[, -1]
+  Match(Y = d$math.score, Tr = d$course, X = Xd, M = 1, replace = FALSE)$est
+}
+boot_maha <- boot(df, statistic = att_maha, R = 1000)
+maha_est <- match_maha$est
+maha_se  <- sd(boot_maha$t, na.rm = TRUE)
+ci_maha <- maha_est + c(-1.96, 1.96) * maha_se
+
+
+# Balance diagnostics
+bal_maha <- bal.tab(match_maha, treat = df$course, covs = cov_mat, un = TRUE, estimand = "ATT")
+cat("Mean |SMD| before/after =",
+    round(mean(abs(bal_maha$Balance$Diff.Un)), 3), "/",
+    round(mean(abs(bal_maha$Balance$Diff.Adj)), 3), "\n")
+print(bal_maha)
+
+# (3) Propensity score matching
+ps_mod <- glm(course ~ edu + lunch + gender + race, data = df, family = binomial)
+df$pscore <- predict(ps_mod, type = "response")
+set.seed(1234)
+match_ps <- Match(Y = df$math.score, Tr = df$course, X = df$pscore, M = 1)
+cat("PSM ATT =", round(match_ps$est, 2), "\n")
+# bootstrap
+boot_ps <- boot(df, statistic = function(d, i) {
+  di <- d[i, , drop = FALSE]
+  Match(Y = di$math.score, Tr = di$course, X = di$pscore, M = 1, replace = FALSE)$est
+}, R = 1000)
+
+bal_ps <- bal.tab(match_ps, treat = df$course, covs = df[, covariates], un = TRUE, estimand = "ATT")
+cat("Mean |SMD| PSM before/after =",
+    round(mean(abs(bal_ps$Balance$Diff.Un)), 3), "/",
+    round(mean(abs(bal_ps$Balance$Diff.Adj)), 3), "\n")
+print(bal_ps)
+
+# (4) PS stratification (5 strata)
+G <- 5
+brks <- quantile(df$pscore, probs = (1:(G-1)) / G)
+df$strata <- cut(df$pscore, breaks = c(0, brks, 1), labels = 1:G)
+strat_res <- t(sapply(1:G, function(g) {
+  idx <- df$strata == g
+  c(weight = sum(idx)/nrow(df),
+    diff   = mean(df$math.score[idx & df$course==1]) - mean(df$math.score[idx & df$course==0]),
+    var    = var(df$math.score[idx & df$course==1]) / sum(idx & df$course==1) +
+      var(df$math.score[idx & df$course==0]) / sum(idx & df$course==0)
+  )
+}))
+ATE_strat <- sum(strat_res[,1] * strat_res[,2])
+SE_strat  <- sqrt(sum(strat_res[,1]^2 * strat_res[,3]))
+
+
+# (5) Regression with PS covariate
+m.5 <- lm(math.score ~ course + pscore, data = df)
+print(summary(m.5))
+
+# (6) IPW regression
+df$w <- ifelse(df$course==1, 1/df$pscore, 1/(1-df$pscore))
+m.6 <- lm(math.score ~ course, data = df, weights = w)
+print(summary(m.6))
+
+# (7) Horvitz–Thompson estimator
+ht_fun <- function(d,i) mean(d[i,]$course * d[i,]$math.score / d[i,]$pscore - (1-d[i,]$course)*d[i,]$math.score/(1-d[i,]$pscore))
+ht_est <- ht_fun(df, 1:nrow(df))
+b_ht <- boot(df, statistic=ht_fun, R=500)
+
+
+# (8) Hajek estimator
+hajek_fun <- function(d,i) {
+  di <- d[i,]
+  num <- mean(di$course*di$math.score/di$pscore) - mean((1-di$course)*di$math.score/(1-di$pscore))
+  den <- mean(di$course/di$pscore) + mean((1-di$course)/(1-di$pscore))
+  num/den
+}
+# hj_est <- hijek <- NA # placeholder; can implement similarly
+
+
+# (9) Overlap weights (ATO)
+df$w_ow <- ifelse(df$course==1, 1-df$pscore, df$pscore)
+m.9 <- lm(math.score ~ course, data=df, weights=w_ow)
+print(summary(m.9))
+
+# (10) Doubly Robust estimator
+x_df <- as.data.frame(cov_mat)
+z <- df$course;y<-df$math.score
+ps_dr <- pmin(0.99,pmax(0.01,predict(glm(z~.,data=data.frame(z,x_df),family=binomial),type="response")))
+out1 <- lm(y[z==1]~.,data=data.frame(y=y[z==1],x_df[z==1,]))
+out0 <- lm(y[z==0]~.,data=data.frame(y=y[z==0],x_df[z==0,]))
+y1hat<-predict(out1,newdata=x_df);y0hat<-predict(out0,newdata=x_df)
+dr_est<-mean(y1hat-y0hat+z*(y-y1hat)/ps_dr-(1-z)*(y-y0hat)/(1-ps_dr))
+
+dr_boot <- function(d,i){di<-d[i,];z_i<-di$course;y_i<-di$math.score;x_i<-as.data.frame(cov_mat[i,]);ps_i<-pmin(0.99,pmax(0.01,predict(glm(z_i~.,data=data.frame(z_i,x_i),family=binomial),type="response")));o1<-lm(y_i[z_i==1]~.,data=data.frame(y_i=y_i[z_i==1],x_i[z_i==1,]));o0<-lm(y_i[z_i==0]~.,data=data.frame(y_i=y_i[z_i==0],x_i[z_i==0,]));y1p<-predict(o1,newdata=x_i);y0p<-predict(o0,newdata=x_i);mean(y1p-y0p+z_i*(y_i-y1p)/ps_i-(1-z_i)*(y_i-y0p)/(1-ps_i))}
+b_dr<-boot(df,statistic=dr_boot,R=1000)
+dr_se<-sd(b_dr$t,na.rm=TRUE)
+ci<-dr_est+c(-1.96,1.96)*dr_se
+
+```
+
+```{r, echo=FALSE}
+# 1. Outcome regression
+tidy1 <- tidy(m.1) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Outcome regression",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 2. Mahalanobis matching (Bootstrap)
+tidy2_bs <- tibble(
+  method    = "Mahalanobis matching (Bootstrap)",
+  estimate  = m.2$est,
+  std.error = maha_se_bs, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 3. Propensity score matching (ATT)
+tidy3 <- tibble(
+  method    = "PS matching",
+  estimate  = m.3$est,
+  std.error = sd(boot_out$t),
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2])
+
+# 4. PS stratification (Neyman stratified ATE)
+tidy4 <- tibble(
+  method    = "PS stratification (Neyman)",
+  estimate  = res4["est"],
+  std.error = res4["se"], 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 5. Regression with PS as covariate
+tidy5 <- tidy(m.5) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Reg with PS",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 6. IPW regression (ATE)
+tidy6 <- tidy(m.6) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "IPW regression",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 7. Horvitz-Thompson estimator (ATE, no SE)
+tidy7 <- tibble(
+  method    = "HT estimator",
+  estimate  = ht_est,
+  std.error = ht_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 8. Hájek estimator (ATE, no SE)
+tidy8 <- tibble(
+  method    = "Hájek estimator",
+  estimate  = hajek_est,
+  std.error = hajek_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# 9. Overlap weights (ATO)
+tidy9 <- tidy(m.9) %>%
+  filter(term == "course") %>%
+  transmute(
+    method    = "Overlap weights",
+    estimate  = estimate,
+    std.error = std.error, 
+    evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+  )
+
+# 10. Doubly robust estimator (ATE)
+tidy10 <- tibble(
+  method    = "Doubly robust",
+  estimate  = dr_est,
+  std.error = dr_se, 
+  evalue=evalues.OLS(est = estimate, se = std.error, sd = sd(df$math.score))[2]
+)
+
+# Combine all into one summary table
+summary_tab <- bind_rows(
+  tidy1,
+  tidy2_bs,
+  tidy3,
+  tidy4,
+  tidy5,
+  tidy6,
+  tidy7,
+  tidy8,
+  tidy9,
+  tidy10
+)
+
+# Define the display order
+order <- c(
+  "Outcome regression",
+  "Mahalanobis matching (Bootstrap)",
+  "PS matching",
+  "PS stratification (Neyman)",
+  "Reg with PS",
+  "IPW regression",
+  "HT estimator",
+  "Hájek estimator",
+  "Overlap weights",
+  "Doubly robust"
+)
+
+
+summary_tab <- bind_rows(
+  tidy1, tidy2_bs, tidy3, tidy4,
+  tidy5, tidy6, tidy7, tidy8, tidy9, tidy10
+) %>%
+  # 1) map each method to its estimand
+  mutate(estimand = case_when(
+    method == "Outcome regression"                        ~ "ATE",
+    method == "Mahalanobis matching (Bootstrap)"          ~ "ATT",
+    method == "PS matching"                               ~ "ATT",
+    method == "PS stratification (Neyman)"                ~ "ATE",
+    method == "Reg with PS"                               ~ "ATE",
+    method == "IPW regression"                            ~ "ATE",
+    method == "HT estimator"                              ~ "ATE",
+    method == "Hájek estimator"                           ~ "ATE",
+    method == "Overlap weights"                           ~ "ATO",
+    method == "Doubly robust"                             ~ "ATE",
+    TRUE                                                  ~ NA_character_
+  )) %>%
+  # 2) compute 95% CI
+  mutate(
+    CI_lower = estimate - 1.96 * std.error,
+    CI_upper = estimate + 1.96 * std.error,
+    ci       = sprintf("[%.1f, %.1f]", CI_lower, CI_upper)
+  ) %>%
+  # 3) keep estimand in the final table
+  select(method, estimand, estimate, std.error, ci,evalue)
+
+summary_tab %>%
+  kable(
+    format    = "latex",
+    booktabs  = TRUE,
+    caption   = "Comparison of Causal Methods for `course`",
+    col.names = c("Method", "Estimand", "Estimate", "Std. Error", "95% CI", "E-value")
+  ) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position")
+  ) %>%
+  # set each column's width in cm
+  column_spec(1, width = "4cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "2cm") %>%
+  column_spec(4, width = "2cm") %>%
+  column_spec(5, width = "3cm") %>%
+  column_spec(6, width = "2cm")
+```
+
+```{r, echo=FALSE}
+ggplot(summary_tab, aes(x = estimate, y = method)) + geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 1.96 * std.error, 
+                     xmax = estimate + 1.96 * std.error), height = 0.2) +
+  theme_minimal() +
+  labs(x = "Estimate", y = NULL, title = "Comparison of 'course' Estimates Across Methods")
+```
+
+-   **結論：** 在這可以發現，無論是 SES（家長教育程度/午餐類型）還是教育干預（備考課程），
+在控制了重要變項下，結果顯示無論是學生學業平均成績/語文成績/數學成績，它們都對學生成績有實質且穩定的正向影響。且應分佈相似，各問題在不同的 outcome 中所得到的答案也相似。
+
+# J. 各組員的貢獻
+
+-   本研究由何佩勳與劉育甄負責研究主題發想、研究架構設計及文獻回顧；方法部分由劉育甄與黃芯鈺共同撰寫。全體成員皆參與資料視覺化呈現，並協助結果撰寫。所有組員共同參與報告討論、簡報製作與最終定稿。
